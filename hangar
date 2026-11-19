@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# SC2218 is a false positive in ShellCheck 0.11.0 once a file sources another (koalaman/shellcheck#3421).
+# ShellCheck 0.11.0 reports SC2218 for calls placed before a later `$(function)` call,
+# though every function is defined before main runs (koalaman/shellcheck#3290).
 # shellcheck disable=SC2218
 # rhodes-hangar: headless Android instances running Arknights, each with a La
 # Pluma MAA web console. One instance = data/<name>/ + its compose project.
@@ -73,27 +74,56 @@ parse_opts() {
 
 client_of() { [[ $1 == bilibili ]] && echo Bilibili || echo Official; }
 
+# instance.env is read by this script and by `docker compose --env-file`, which
+# interpolates `$`. Every value is held to characters neither treats specially.
+check_field() {
+	local key=$1 value=$2 ok=""
+	case $key in
+	HANGAR_INSTANCE) [[ $value =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] && ok=1 ;;
+	HANGAR_CLIENT_TYPE) [[ $value == Official || $value == Bilibili ]] && ok=1 ;;
+	HANGAR_WEB_PORT | HANGAR_ADB_PORT) [[ $value =~ ^[1-9][0-9]{0,4}$ ]] && ((value <= 65535)) && ok=1 ;;
+	HANGAR_GPU_NODE) [[ $value =~ ^/dev/dri/[A-Za-z0-9_]+$ ]] && ok=1 ;;
+	LA_PLUMA_TOKEN) [[ $value =~ ^[A-Za-z0-9._~+/=-]{16,256}$ ]] && ok=1 ;;
+	*) die "$ENV_FILE: unknown setting $key" ;;
+	esac
+	[[ -n $ok ]] && return 0
+	case $key in
+	LA_PLUMA_TOKEN) die "LA_PLUMA_TOKEN must be 16-256 characters of A-Z a-z 0-9 . _ ~ + / = -" ;;
+	HANGAR_GPU_NODE) die "the GPU node must look like /dev/dri/renderD129, not: $value" ;;
+	*) die "invalid $key: $value" ;;
+	esac
+}
+
+ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_WEB_PORT HANGAR_ADB_PORT HANGAR_GPU_NODE LA_PLUMA_TOKEN)
+
 # Writes instance.env from the current values; the token never leaves the file.
 write_env() {
+	local key
+	HANGAR_INSTANCE=$instance
+	for key in "${ENV_KEYS[@]}"; do check_field "$key" "${!key}"; done
+	mkdir -p "$DATA"
 	umask 077
-	cat >"$ENV_FILE.tmp" <<EOF
-# rhodes-hangar instance "$instance". Edit, then run: ./hangar deploy -i $instance
-HANGAR_INSTANCE=$instance
-HANGAR_CLIENT_TYPE=$HANGAR_CLIENT_TYPE
-HANGAR_WEB_PORT=$HANGAR_WEB_PORT
-HANGAR_ADB_PORT=$HANGAR_ADB_PORT
-HANGAR_GPU_NODE=$HANGAR_GPU_NODE
-LA_PLUMA_TOKEN=$LA_PLUMA_TOKEN
-EOF
+	{
+		printf '# rhodes-hangar instance "%s". Edit, then run: ./hangar deploy -i %s\n' "$instance" "$instance"
+		for key in "${ENV_KEYS[@]}"; do printf '%s=%s\n' "$key" "${!key}"; done
+	} >"$ENV_FILE.tmp"
 	mv "$ENV_FILE.tmp" "$ENV_FILE"
 }
 
+# Reads instance.env as data: known keys only, each value checked, nothing executed.
 load_env() {
 	[[ -f $ENV_FILE ]] || die "no instance \"$instance\"; create it with: ./hangar deploy -i $instance"
-	set -a
-	# shellcheck disable=SC1090
-	. "$ENV_FILE"
-	set +a
+	local key value line
+	for key in "${ENV_KEYS[@]}"; do unset "$key"; done
+	while IFS= read -r line || [[ -n $line ]]; do
+		[[ -z $line || $line == \#* ]] && continue
+		[[ $line == *=* ]] || die "$ENV_FILE: not KEY=VALUE: $line"
+		key=${line%%=*} value=${line#*=}
+		check_field "$key" "$value"
+		printf -v "$key" '%s' "$value"
+	done <"$ENV_FILE"
+	for key in "${ENV_KEYS[@]}"; do [[ -n ${!key:-} ]] || die "$ENV_FILE: $key is missing"; done
+	[[ $HANGAR_INSTANCE == "$instance" ]] || die "$ENV_FILE belongs to instance $HANGAR_INSTANCE"
 	SERIAL=127.0.0.1:$HANGAR_ADB_PORT
 	WEB=http://127.0.0.1:$HANGAR_WEB_PORT
 	if [[ $HANGAR_CLIENT_TYPE == Bilibili ]]; then
@@ -109,7 +139,6 @@ configure_instance() {
 		load_env
 	else
 		step "Creating instance \"$instance\""
-		mkdir -p "$DATA"/android "$DATA"/la-pluma/{data,maa-config/profiles,maa-data}
 		HANGAR_CLIENT_TYPE=Official
 		HANGAR_WEB_PORT=13055
 		HANGAR_ADB_PORT=15556
@@ -123,7 +152,9 @@ configure_instance() {
 	HANGAR_WEB_PORT=${web_port:-$HANGAR_WEB_PORT}
 	HANGAR_ADB_PORT=${adb_port:-$HANGAR_ADB_PORT}
 	HANGAR_GPU_NODE=${gpu_node:-$HANGAR_GPU_NODE}
+	# Checked before anything is created, so a bad value leaves nothing behind.
 	write_env
+	mkdir -p "$DATA"/android "$DATA"/la-pluma/{data,maa-config/profiles,maa-data}
 	load_env
 }
 
