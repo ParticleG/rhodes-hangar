@@ -1,0 +1,6 @@
+# Instance data: Android /data, La Pluma, MAA resources and the access token.
+/data/
+# Downloaded game packages.
+/cache/
+# Downloaded by hangar deploy, checksum pinned in the script.
+/image/ndk34.tgz

@@ -1,0 +1,44 @@
+# One hangar instance: a headless Android 14 (redroid) and the La Pluma MAA web
+# console connected to it. Run through `./hangar`, which passes the instance's
+# data/<instance>/instance.env; `docker compose` alone lacks those variables.
+services:
+  android:
+    image: local/rhodes-hangar-redroid:14-avd34
+    pull_policy: never
+    privileged: true
+    # Contain a runaway guest (2026-11-19: a crash_dump32 storm filled the host's 24 CPUs).
+    # pids counts threads; Android with the game running peaks near 1200.
+    pids_limit: 4096
+    cpus: 8
+    ports:
+      # Host-side adb and scrcpy only; La Pluma reaches android:5555 on the compose network.
+      - "127.0.0.1:${HANGAR_ADB_PORT:?}:5555"
+    volumes:
+      - ./data/${HANGAR_INSTANCE:?}/android:/data
+    command:
+      - ro.enable.native.bridge.exec=0
+      - androidboot.use_memfd=1
+      - androidboot.redroid_width=1280
+      - androidboot.redroid_height=720
+      - androidboot.redroid_dpi=240
+      - androidboot.redroid_fps=30
+      - androidboot.redroid_gpu_mode=host
+      - androidboot.redroid_gpu_node=${HANGAR_GPU_NODE:?}
+
+  la-pluma:
+    image: miaona/la-pluma@sha256:fa18e088eea026cc52fcd4951e05ee6a16c2272f5cdfd7ff89677973d487b29c
+    depends_on:
+      - android
+    ports:
+      - "127.0.0.1:${HANGAR_WEB_PORT:?}:3000"
+    environment:
+      ADB_ADDRESS: android:5555
+      # Official or Bilibili: the client MAA starts and operates by default.
+      MAA_CLIENT_TYPE: ${HANGAR_CLIENT_TYPE:?}
+      LA_PLUMA_TOKEN: ${LA_PLUMA_TOKEN:?}
+    volumes:
+      - ./data/${HANGAR_INSTANCE}/la-pluma/data:/app/data
+      # maa-cli settings: profiles/default.toml holds the connection to android:5555.
+      - ./data/${HANGAR_INSTANCE}/la-pluma/maa-config:/root/.config/maa
+      # MaaCore and resources, installed by the image on first start.
+      - ./data/${HANGAR_INSTANCE}/la-pluma/maa-data:/root/.local/share/maa

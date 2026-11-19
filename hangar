@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# SC2218 is a false positive in ShellCheck 0.11.0 once a file sources another (koalaman/shellcheck#3421).
+# shellcheck disable=SC2218
+# rhodes-hangar: headless Android instances running Arknights, each with a La
+# Pluma MAA web console. One instance = data/<name>/ + its compose project.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+IMAGE=local/rhodes-hangar-redroid:14-avd34
+REDROID_BASE=redroid/redroid@sha256:a3e654caad74faed03cd5ead057a989e06f507778cda678e5d3b9772e0092f1c
+# ER5TT/ndk 9ecefe66 (Google AVD 34 ext12 r01 ARM translation); codeload serves this tarball byte for byte.
+NDK_URL=https://codeload.github.com/ER5TT/ndk/tar.gz/9ecefe66bb78e3347bbac7d2237befebd0552c15
+NDK_SHA256=c18361e92be742d2b2e21f075081ca7cba97fbb4d251f8e3ff7bf04ad9bb1f65
+BOOT_TIMEOUT_S=240
+# The Bilibili package CDN answers 403 to curl's and bare browser user agents; it serves
+# Android's download manager. The official CDN accepts it too.
+APK_UA='Dalvik/2.1.0 (Linux; U; Android 14)'
+
+usage() {
+	cat <<'EOF'
+usage: hangar COMMAND [-i INSTANCE] [options]
+
+  deploy        Build the image if missing, create or update the instance, start it,
+                install or update Arknights, and check that La Pluma reaches Android.
+                  --server official|bilibili   game server (new instance default: official)
+                  --web-port N --adb-port N    host ports (new instance default: 13055, 15556)
+                  --gpu-node PATH              render node (default: /dev/dri/renderD129)
+  install-game  Install or update Arknights on a running instance.
+  up | down     Start or stop an instance.
+  status        Containers, game version and La Pluma's connection check.
+  screen        Mirror the instance with scrcpy (audio off: this Android has no opus encoder).
+
+INSTANCE defaults to "main". Web console: http://127.0.0.1:<web-port>, token in
+data/<instance>/instance.env.
+EOF
+}
+
+die() { printf 'hangar: %s\n' "$*" >&2; exit 1; }
+step() { printf '\033[1m==> %s\033[0m\n' "$*"; }
+
+need() {
+	local c
+	for c in "$@"; do command -v "$c" >/dev/null || die "$c is required"; done
+}
+
+# ---- instance configuration ----
+
+instance=main
+server=""
+web_port=""
+adb_port=""
+gpu_node=""
+
+parse_opts() {
+	while (($#)); do
+		case $1 in
+		-i | --instance) instance=${2:?}; shift ;;
+		--server) server=${2:?}; shift ;;
+		--web-port) web_port=${2:?}; shift ;;
+		--adb-port) adb_port=${2:?}; shift ;;
+		--gpu-node) gpu_node=${2:?}; shift ;;
+		-h | --help) usage; exit 0 ;;
+		*) die "unknown option: $1" ;;
+		esac
+		shift
+	done
+	[[ $instance =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "instance names use a-z, 0-9 and -"
+	case $server in "" | official | bilibili) ;; *) die "--server is official or bilibili" ;; esac
+	DATA=$ROOT/data/$instance
+	ENV_FILE=$DATA/instance.env
+	PROJECT=rhodes-hangar-$instance
+}
+
+client_of() { [[ $1 == bilibili ]] && echo Bilibili || echo Official; }
+
+# Writes instance.env from the current values; the token never leaves the file.
+write_env() {
+	umask 077
+	cat >"$ENV_FILE.tmp" <<EOF
+# rhodes-hangar instance "$instance". Edit, then run: ./hangar deploy -i $instance
+HANGAR_INSTANCE=$instance
+HANGAR_CLIENT_TYPE=$HANGAR_CLIENT_TYPE
+HANGAR_WEB_PORT=$HANGAR_WEB_PORT
+HANGAR_ADB_PORT=$HANGAR_ADB_PORT
+HANGAR_GPU_NODE=$HANGAR_GPU_NODE
+LA_PLUMA_TOKEN=$LA_PLUMA_TOKEN
+EOF
+	mv "$ENV_FILE.tmp" "$ENV_FILE"
+}
+
+load_env() {
+	[[ -f $ENV_FILE ]] || die "no instance \"$instance\"; create it with: ./hangar deploy -i $instance"
+	set -a
+	# shellcheck disable=SC1090
+	. "$ENV_FILE"
+	set +a
+	SERIAL=127.0.0.1:$HANGAR_ADB_PORT
+	WEB=http://127.0.0.1:$HANGAR_WEB_PORT
+	if [[ $HANGAR_CLIENT_TYPE == Bilibili ]]; then
+		PKG=com.hypergryph.arknights.bilibili
+	else
+		PKG=com.hypergryph.arknights
+	fi
+}
+
+# Creates the instance on first deploy with defaults; every deploy applies the options given.
+configure_instance() {
+	if [[ -f $ENV_FILE ]]; then
+		load_env
+	else
+		step "Creating instance \"$instance\""
+		mkdir -p "$DATA"/android "$DATA"/la-pluma/{data,maa-config/profiles,maa-data}
+		HANGAR_CLIENT_TYPE=Official
+		HANGAR_WEB_PORT=13055
+		HANGAR_ADB_PORT=15556
+		HANGAR_GPU_NODE=/dev/dri/renderD129
+		# A token in the environment is kept, as when moving an existing console here.
+		LA_PLUMA_TOKEN=${LA_PLUMA_TOKEN:-$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')}
+	fi
+	if [[ -n $server ]]; then
+		HANGAR_CLIENT_TYPE=$(client_of "$server")
+	fi
+	HANGAR_WEB_PORT=${web_port:-$HANGAR_WEB_PORT}
+	HANGAR_ADB_PORT=${adb_port:-$HANGAR_ADB_PORT}
+	HANGAR_GPU_NODE=${gpu_node:-$HANGAR_GPU_NODE}
+	write_env
+	load_env
+}
+
+# maa-cli's connection profile: La Pluma runs MAA against it. redroid needs the
+# POSIX shell adb config, and MaaTouch for input.
+write_maa_profile() {
+	local dir=$DATA/la-pluma/maa-config
+	mkdir -p "$dir/profiles"
+	cat >"$dir/profiles/default.toml.tmp" <<'EOF'
+# Written by hangar deploy: MAA's connection to this instance's Android.
+[connection]
+adb_path = "/usr/bin/adb"
+address = "android:5555"
+config = "CompatPOSIXShell"
+
+[instance_options]
+touch_mode = "MaaTouch"
+kill_adb_on_exit = false
+EOF
+	mv "$dir/profiles/default.toml.tmp" "$dir/profiles/default.toml"
+	[[ -f $dir/cli.toml ]] || cat >"$dir/cli.toml" <<'EOF'
+# Fetch MAA's official hot-update files directly from MaaRelease.
+[hot_update]
+api_url = "https://raw.githubusercontent.com/MaaAssistantArknights/MaaRelease/main/MaaAssistantArknights/api"
+EOF
+	return 0
+}
+
+compose() { docker compose -p "$PROJECT" --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$ENV_FILE" "$@"; }
+
+# ---- image ----
+
+ensure_image() {
+	docker image inspect "$IMAGE" >/dev/null 2>&1 && return
+	step "Building $IMAGE"
+	local tgz=$ROOT/image/ndk34.tgz
+	if ! echo "$NDK_SHA256  $tgz" | sha256sum -c --quiet - 2>/dev/null; then
+		curl -fL --retry 3 -o "$tgz.part" "$NDK_URL"
+		echo "$NDK_SHA256  $tgz.part" | sha256sum -c --quiet - || die "ndk34.tgz checksum mismatch"
+		mv "$tgz.part" "$tgz"
+	fi
+	docker build --target avd34 --build-arg "REDROID=$REDROID_BASE" -t "$IMAGE" "$ROOT/image"
+}
+
+# ---- Android ----
+
+adb_dev() { adb -s "$SERIAL" "$@"; }
+
+wait_boot() {
+	step "Waiting for Android to boot ($SERIAL)"
+	local deadline=$((SECONDS + BOOT_TIMEOUT_S))
+	until [[ $(adb_dev shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]]; do
+		((SECONDS < deadline)) || die "Android did not boot within ${BOOT_TIMEOUT_S}s (see: ./hangar status -i $instance)"
+		adb connect "$SERIAL" >/dev/null 2>&1 || true
+		sleep 3
+	done
+}
+
+installed_version() { adb_dev shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/^ *versionName=//p' | head -1; }
+
+latest_version() {
+	local channel=official
+	[[ $HANGAR_CLIENT_TYPE == Bilibili ]] && channel=b
+	curl -fsS --max-time 20 "https://ak-conf.hypergryph.com/config/prod/$channel/Android/version" | jq -r .clientVersion
+}
+
+apk_url() {
+	if [[ $HANGAR_CLIENT_TYPE == Bilibili ]]; then
+		curl -fsS --max-time 20 'https://line1-h5-pc-api.biligame.com/game/detail/gameinfo?game_base_id=101772' | jq -er .data.android_download_link
+	else
+		# The launcher refuses HEAD; a one-byte GET follows the redirects to the CDN file.
+		curl -fsSL --max-time 30 -A "$APK_UA" -r 0-0 -o /dev/null -w '%{url_effective}' https://ak.hypergryph.com/downloads/android_lastest
+	fi
+}
+
+# Downloads the APK into cache/ (resumable), checks its size and zip header.
+fetch_apk() {
+	local url=$1 file total
+	mkdir -p "$ROOT/cache"
+	file=$ROOT/cache/$(basename "${url%%\?*}")
+	total=$(curl -fsSL --max-time 30 -A "$APK_UA" -r 0-0 -D - -o /dev/null "$url" | tr -d '\r' | sed -n 's/^content-range: bytes 0-0\///Ip' | tail -1)
+	[[ $total =~ ^[0-9]+$ ]] || die "could not read the APK size from $url"
+	if [[ ! -f $file || $(stat -c %s "$file") != "$total" ]]; then
+		printf '%s\n' "Downloading $(basename "$file") ($((total / 1048576)) MiB)" >&2
+		curl -fL --retry 5 -A "$APK_UA" -C - -o "$file" "$url" >&2
+	fi
+	[[ $(stat -c %s "$file") == "$total" ]] || die "incomplete download: $file"
+	[[ $(head -c 2 "$file") == PK ]] || die "not an APK: $file"
+	# Keep only the current package of each server.
+	find "$ROOT/cache" -maxdepth 1 -name '*.apk' ! -name "$(basename "$file")" \
+		-name "$( [[ $HANGAR_CLIENT_TYPE == Bilibili ]] && echo 'mrfz_*' || echo 'arknights-hg-*')" -delete
+	printf '%s\n' "$file"
+}
+
+install_game() {
+	local have want url apk
+	have=$(installed_version)
+	want=$(latest_version) || die "could not read the latest Arknights version"
+	if [[ -n $have && $have == "$want" ]]; then
+		step "Arknights $have ($PKG) is up to date"
+		return
+	fi
+	step "Installing Arknights $want ($HANGAR_CLIENT_TYPE${have:+, replacing $have})"
+	url=$(apk_url) || die "could not find the APK download"
+	apk=$(fetch_apk "$url")
+	# The game ships ARM code only; the translation layer runs it on x86_64.
+	adb_dev install -r --abi arm64-v8a "$apk"
+	[[ $(installed_version) == "$want" ]] || die "after install the version is $(installed_version), not $want"
+	[[ -z $have ]] && first_install=1
+	return 0
+}
+
+# ---- La Pluma ----
+
+lapluma() { curl -fsS --max-time 30 -H "X-La-Pluma-Token: $LA_PLUMA_TOKEN" "$@"; }
+
+check_console() {
+	step "Checking La Pluma at $WEB"
+	local deadline=$((SECONDS + 120)) r
+	until curl -fsS --max-time 5 "$WEB/health" >/dev/null 2>&1; do
+		((SECONDS < deadline)) || die "La Pluma did not answer at $WEB/health"
+		sleep 2
+	done
+	r=$(lapluma -X POST -H 'Content-Type: application/json' -d '{}' "$WEB/api/agent/actions/test-connection") ||
+		die "La Pluma's connection check failed"
+	jq -e '.data.connected == true' <<<"$r" >/dev/null || die "La Pluma cannot reach Android: $(jq -r .message <<<"$r")"
+	printf '    %s (client: %s)\n' "$(jq -r .message <<<"$r")" \
+		"$(lapluma "$WEB/api/agent/status" | jq -r .data.connection.clientType)"
+}
+
+# ---- commands ----
+
+cmd_deploy() {
+	need docker adb curl jq sha256sum
+	configure_instance
+	ensure_image
+	write_maa_profile
+	step "Starting $PROJECT"
+	compose up -d --remove-orphans
+	wait_boot
+	install_game
+	check_console
+	cat <<EOF
+
+Instance "$instance" is ready.
+  Web console  $WEB   (token: LA_PLUMA_TOKEN in data/$instance/instance.env)
+  Android      adb -s $SERIAL, or ./hangar screen -i $instance
+EOF
+	if [[ -n ${first_install:-} ]]; then
+		printf '  Open the game once and log in: it downloads ~12 GB of resources on first launch.\n'
+	fi
+	return 0
+}
+
+cmd_status() {
+	need docker adb curl jq
+	load_env
+	compose ps
+	adb connect "$SERIAL" >/dev/null 2>&1 || true
+	printf '\nArknights (%s): %s\n' "$PKG" "$(installed_version || true)"
+	check_console || true
+}
+
+main() {
+	local cmd=${1:-}
+	(($#)) && shift
+	case $cmd in
+	deploy) parse_opts "$@"; cmd_deploy ;;
+	install-game) parse_opts "$@"; need adb curl jq; load_env; wait_boot; install_game ;;
+	up) parse_opts "$@"; need docker; load_env; write_maa_profile; compose up -d ;;
+	down) parse_opts "$@"; need docker; load_env; compose down ;;
+	status) parse_opts "$@"; cmd_status ;;
+	screen) parse_opts "$@"; need scrcpy adb; load_env; adb connect "$SERIAL" >/dev/null
+		exec scrcpy -s "$SERIAL" --no-audio --no-clipboard-autosync --window-title="Arknights · $instance" ;;
+	"" | -h | --help | help) usage ;;
+	*) die "unknown command: $cmd (see: ./hangar help)" ;;
+	esac
+}
+
+main "$@"
