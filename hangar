@@ -235,7 +235,10 @@ configure_instance() {
 		HANGAR_PUBLIC_IP=""
 	elif [[ -n $public_ip ]]; then
 		HANGAR_PUBLIC_IP=$public_ip
-	elif [[ -n $bind && $bind != 0.0.0.0 && $bind != 127.* ]]; then
+	elif [[ $bind == 127.* ]]; then
+		# Back to this machine only: the relay closes with the console.
+		HANGAR_PUBLIC_IP=""
+	elif [[ -n $bind && $bind != 0.0.0.0 ]]; then
 		# Listening on one address: browsers elsewhere reach this host there.
 		HANGAR_PUBLIC_IP=$bind
 	fi

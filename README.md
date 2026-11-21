@@ -73,12 +73,13 @@ The web console listens on `127.0.0.1`. Another machine needs two paths to it:
 The relay is needed because the preview is WebRTC: without a public IP La Pluma
 offers browsers only the container's address (`172.x`), which no other machine
 reaches, and the console loads while its preview stays blank. With `--bind` set
-to one address, `--public-ip` defaults to it:
+to one address, `--public-ip` defaults to it, and `--bind 127.0.0.1` clears it:
 
 ```sh
 ./hangar deploy --bind 192.168.1.20                     # LAN: console and preview
 ./hangar deploy --bind 0.0.0.0 --public-ip 192.168.1.20 # every interface, LAN address for the relay
-./hangar deploy --bind 127.0.0.1 --public-ip none       # back to this machine only
+./hangar deploy --bind 127.0.0.1                        # back to this machine only
+./hangar deploy --bind 127.0.0.1 --public-ip 203.0.113.7 # console behind a local TLS proxy, relay public
 ```
 
 Each instance's relay uses its own web port number, so instances do not
@@ -93,10 +94,11 @@ Over the internet:
 - **Public exposure** needs TCP and UDP `<web-port>` forwarded to this host,
   `--public-ip` set to the public IPv4 address (an address, not a domain; update
   it when it changes), and TLS in front of the console: it speaks plain HTTP,
-  so the token would cross the internet in clear text. A TLS proxy (Caddy,
-  nginx) on the TCP port should work, as the console's API and the preview's
-  signaling (a WebSocket) share one origin; this is untested. The relay's UDP
-  goes straight to this host. Browsers on this
+  so the token would cross the internet in clear text. La Pluma's own README
+  covers both ways: its built-in HTTPS (`LA_PLUMA_HTTPS_CERT_PATH` and
+  `LA_PLUMA_HTTPS_KEY_PATH`), or a reverse proxy forwarding `/`, `/api`,
+  `/health` and `/webrtc-signaling` with the WebSocket upgrade. Neither is
+  tested here. The relay's UDP goes straight to this host. Browsers on this
   host's own LAN then reach the relay at the public address only if the router
   supports hairpin NAT.
 - The console is a single token away from controlling the game account; the
