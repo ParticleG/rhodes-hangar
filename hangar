@@ -108,6 +108,10 @@ write_env() {
 		for key in "${ENV_KEYS[@]}"; do printf '%s=%s\n' "$key" "${!key}"; done
 	} >"$ENV_FILE.tmp"
 	mv "$ENV_FILE.tmp" "$ENV_FILE"
+	# Plain `docker compose` in the project directory then manages the main instance.
+	if [[ $instance == main ]]; then
+		ln -sfn data/main/instance.env "$ROOT/.env"
+	fi
 }
 
 # Reads instance.env as data: known keys only, each value checked, nothing executed.
@@ -183,7 +187,7 @@ EOF
 	return 0
 }
 
-compose() { docker compose -p "$PROJECT" --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$ENV_FILE" "$@"; }
+compose() { docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$ENV_FILE" "$@"; }
 
 # ---- image ----
 

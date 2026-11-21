@@ -1,6 +1,9 @@
 # One hangar instance: a headless Android 14 (redroid) and the La Pluma MAA web
-# console connected to it. Run through `./hangar`, which passes the instance's
-# data/<instance>/instance.env; `docker compose` alone lacks those variables.
+# console connected to it. Its settings are data/<instance>/instance.env, which
+# `./hangar` passes in. Plain `docker compose` in this directory reads .env, a
+# link to data/main/instance.env; for another instance add
+# `--env-file data/<instance>/instance.env`.
+name: rhodes-hangar-${HANGAR_INSTANCE:?}
 services:
   android:
     image: local/rhodes-hangar-redroid:14-avd34

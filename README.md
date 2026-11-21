@@ -62,6 +62,11 @@ with its token, set `LA_PLUMA_TOKEN` in the environment for the first deploy.
 `-i NAME` picks the instance (default `main`). A second instance needs its own
 ports: `./hangar deploy -i alt --web-port 13066 --adb-port 15566`.
 
+Plain `docker compose` works in this directory too: `.env` links to
+`data/main/instance.env` (made by the first `deploy` of `main`), so
+`docker compose down`, `ps` or `logs` act on `rhodes-hangar-main`. For another
+instance pass its file: `docker compose --env-file data/alt/instance.env down`.
+
 ## Notes
 
 - `hangar screen` runs scrcpy without audio. Plain `scrcpy` captures audio by

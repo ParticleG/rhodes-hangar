@@ -1,3 +1,5 @@
+# Link to data/main/instance.env, for plain `docker compose` (holds the token).
+/.env
 # Instance data: Android /data, La Pluma, MAA resources and the access token.
 /data/
 # Downloaded game packages.
