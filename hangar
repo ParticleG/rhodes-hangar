@@ -24,18 +24,25 @@ usage: hangar COMMAND [-i INSTANCE] [options]
   deploy        Build the image if missing, create or update the instance, start it,
                 install or update Arknights, and check that La Pluma reaches Android.
                   --server official|bilibili   game server (new instance default: official)
-                  --web-port N --adb-port N    host ports (new instance default: 13055, 15556)
+                  --web-port N                 web console port (new instance default: 13055);
+                                               the live preview relay uses UDP on the same number
                   --bind ADDR                  web console listen address: 127.0.0.1 (default),
                                                0.0.0.0 for every interface, or one IPv4 address
+                  --public-ip ADDR|none        the IPv4 address other machines reach this host at;
+                                               lets their browsers show the live preview
+                                               (default: the --bind address when it is one)
+                  --adb-bind ADDR|none         publish adb outside the compose network:
+                                               none (default), 127.0.0.1, or another address
+                  --adb-port N                 adb host port when published (default: 15556)
                   --gpu-node PATH              render node (default: /dev/dri/renderD129)
   install-game  Install or update Arknights on a running instance.
   up | down     Start or stop an instance.
   status        Containers, game version and La Pluma's connection check.
-  screen        Mirror the instance with scrcpy (audio off: this Android has no opus encoder).
+  screen        Mirror the instance with scrcpy (needs --adb-bind; audio off: this
+                Android has no opus encoder).
 
 INSTANCE defaults to "main". Web console: http://<bind>:<web-port>, token in
-data/<instance>/instance.env. adb always listens on 127.0.0.1: it is a root shell
-in a privileged container.
+data/<instance>/instance.env.
 EOF
 }
 
@@ -55,6 +62,8 @@ web_port=""
 adb_port=""
 gpu_node=""
 bind=""
+public_ip=""
+adb_bind=""
 
 parse_opts() {
 	while (($#)); do
@@ -65,6 +74,8 @@ parse_opts() {
 		--adb-port) adb_port=${2:?}; shift ;;
 		--gpu-node) gpu_node=${2:?}; shift ;;
 		--bind) bind=${2:?}; shift ;;
+		--public-ip) public_ip=${2:?}; shift ;;
+		--adb-bind) adb_bind=${2:?}; shift ;;
 		-h | --help) usage; exit 0 ;;
 		*) die "unknown option: $1" ;;
 		esac
@@ -99,24 +110,46 @@ check_field() {
 	HANGAR_CLIENT_TYPE) [[ $value == Official || $value == Bilibili ]] && ok=1 ;;
 	HANGAR_WEB_PORT | HANGAR_ADB_PORT) [[ $value =~ ^[1-9][0-9]{0,4}$ ]] && ((value <= 65535)) && ok=1 ;;
 	HANGAR_BIND) is_ipv4 "$value" && ok=1 ;;
+	HANGAR_PUBLIC_IP) [[ -z $value ]] || { is_ipv4 "$value" && [[ $value != 0.0.0.0 && $value != 127.* ]]; } && ok=1 ;;
+	HANGAR_TURN_BIND) [[ $value == 127.0.0.1 || $value == 0.0.0.0 ]] && ok=1 ;;
+	HANGAR_ADB_BIND) [[ $value == none ]] || is_ipv4 "$value" && ok=1 ;;
 	HANGAR_GPU_NODE) [[ $value =~ ^/dev/dri/[A-Za-z0-9_]+$ ]] && ok=1 ;;
 	LA_PLUMA_TOKEN) [[ $value =~ ^[A-Za-z0-9._~+/=-]{16,256}$ ]] && ok=1 ;;
+	HANGAR_TURN_PASSWORD) [[ $value =~ ^[A-Za-z0-9]{16,64}$ ]] && ok=1 ;;
+	COMPOSE_FILE) [[ $value == compose.yaml || $value == compose.yaml:compose.adb.yaml ]] && ok=1 ;;
 	*) die "$ENV_FILE: unknown setting $key" ;;
 	esac
 	[[ -n $ok ]] && return 0
 	case $key in
 	LA_PLUMA_TOKEN) die "LA_PLUMA_TOKEN must be 16-256 characters of A-Z a-z 0-9 . _ ~ + / = -" ;;
 	HANGAR_GPU_NODE) die "the GPU node must look like /dev/dri/renderD129, not: $value" ;;
+	HANGAR_PUBLIC_IP) die "the public IP is an IPv4 address other machines reach this host at, not: $value" ;;
+	HANGAR_ADB_BIND) die "the adb address is none or an IPv4 address, not: $value" ;;
 	*) die "invalid $key: $value" ;;
 	esac
 }
 
-ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_BIND HANGAR_WEB_PORT HANGAR_ADB_PORT HANGAR_GPU_NODE LA_PLUMA_TOKEN)
+ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_BIND HANGAR_WEB_PORT HANGAR_PUBLIC_IP HANGAR_TURN_BIND
+	HANGAR_ADB_BIND HANGAR_ADB_PORT HANGAR_GPU_NODE LA_PLUMA_TOKEN HANGAR_TURN_PASSWORD COMPOSE_FILE)
+
+random_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+
+# Values that follow from the settings, written out for plain `docker compose`.
+derive() {
+	# The relay only matters to other machines; it opens to them with a public IP.
+	# shellcheck disable=SC2034 # written out by write_env through ${!key}
+	HANGAR_TURN_BIND=$([[ -n $HANGAR_PUBLIC_IP ]] && echo 0.0.0.0 || echo 127.0.0.1)
+	COMPOSE_FILE=compose.yaml
+	if [[ $HANGAR_ADB_BIND != none ]]; then
+		COMPOSE_FILE=compose.yaml:compose.adb.yaml
+	fi
+}
 
 # Writes instance.env from the current values; the token never leaves the file.
 write_env() {
 	local key
 	HANGAR_INSTANCE=$instance
+	derive
 	for key in "${ENV_KEYS[@]}"; do check_field "$key" "${!key}"; done
 	mkdir -p "$DATA"
 	umask 077
@@ -132,9 +165,10 @@ write_env() {
 }
 
 # Reads instance.env as data: known keys only, each value checked, nothing executed.
+# `upgrading` accepts a file from an older hangar that deploy is about to rewrite.
 load_env() {
 	[[ -f $ENV_FILE ]] || die "no instance \"$instance\"; create it with: ./hangar deploy -i $instance"
-	local key value line
+	local key value line upgrading=${1:-}
 	for key in "${ENV_KEYS[@]}"; do unset "$key"; done
 	while IFS= read -r line || [[ -n $line ]]; do
 		[[ -z $line || $line == \#* ]] && continue
@@ -143,13 +177,26 @@ load_env() {
 		check_field "$key" "$value"
 		printf -v "$key" '%s' "$value"
 	done <"$ENV_FILE"
-	# Files written before --bind existed listen on localhost.
+	# Settings added after the first release keep their defaults when absent.
 	HANGAR_BIND=${HANGAR_BIND:-127.0.0.1}
-	for key in "${ENV_KEYS[@]}"; do [[ -n ${!key:-} ]] || die "$ENV_FILE: $key is missing"; done
+	HANGAR_PUBLIC_IP=${HANGAR_PUBLIC_IP:-}
+	HANGAR_ADB_BIND=${HANGAR_ADB_BIND:-none}
+	derive
+	if [[ -z ${HANGAR_TURN_PASSWORD:-} && -n $upgrading ]]; then
+		HANGAR_TURN_PASSWORD=$(random_hex 16)
+	fi
+	for key in "${ENV_KEYS[@]}"; do
+		[[ $key == HANGAR_PUBLIC_IP || -n ${!key:-} ]] && continue
+		[[ $key == HANGAR_TURN_PASSWORD ]] && die "$ENV_FILE is from an older hangar; run: ./hangar deploy -i $instance"
+		die "$ENV_FILE: $key is missing"
+	done
 	[[ $HANGAR_INSTANCE == "$instance" ]] || die "$ENV_FILE belongs to instance $HANGAR_INSTANCE"
-	SERIAL=127.0.0.1:$HANGAR_ADB_PORT
 	# This script reaches the console locally; 0.0.0.0 includes the loopback address.
-	WEB=http://$([[ $HANGAR_BIND == 0.0.0.0 ]] && echo 127.0.0.1 || echo "$HANGAR_BIND"):$HANGAR_WEB_PORT
+	WEB=http://$(local_addr "$HANGAR_BIND"):$HANGAR_WEB_PORT
+	SERIAL=""
+	if [[ $HANGAR_ADB_BIND != none ]]; then
+		SERIAL=$(local_addr "$HANGAR_ADB_BIND"):$HANGAR_ADB_PORT
+	fi
 	if [[ $HANGAR_CLIENT_TYPE == Bilibili ]]; then
 		PKG=com.hypergryph.arknights.bilibili
 	else
@@ -157,27 +204,41 @@ load_env() {
 	fi
 }
 
+local_addr() { [[ $1 == 0.0.0.0 ]] && echo 127.0.0.1 || echo "$1"; }
+
 # Creates the instance on first deploy with defaults; every deploy applies the options given.
 configure_instance() {
 	if [[ -f $ENV_FILE ]]; then
-		load_env
+		load_env upgrading
 	else
 		step "Creating instance \"$instance\""
 		HANGAR_CLIENT_TYPE=Official
 		HANGAR_WEB_PORT=13055
-		HANGAR_ADB_PORT=15556
 		HANGAR_BIND=127.0.0.1
+		HANGAR_PUBLIC_IP=""
+		HANGAR_ADB_BIND=none
+		HANGAR_ADB_PORT=15556
 		HANGAR_GPU_NODE=/dev/dri/renderD129
 		# A token in the environment is kept, as when moving an existing console here.
-		LA_PLUMA_TOKEN=${LA_PLUMA_TOKEN:-$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')}
+		LA_PLUMA_TOKEN=${LA_PLUMA_TOKEN:-$(random_hex 24)}
+		HANGAR_TURN_PASSWORD=$(random_hex 16)
 	fi
 	if [[ -n $server ]]; then
 		HANGAR_CLIENT_TYPE=$(client_of "$server")
 	fi
 	HANGAR_WEB_PORT=${web_port:-$HANGAR_WEB_PORT}
 	HANGAR_BIND=${bind:-$HANGAR_BIND}
+	HANGAR_ADB_BIND=${adb_bind:-$HANGAR_ADB_BIND}
 	HANGAR_ADB_PORT=${adb_port:-$HANGAR_ADB_PORT}
 	HANGAR_GPU_NODE=${gpu_node:-$HANGAR_GPU_NODE}
+	if [[ $public_ip == none ]]; then
+		HANGAR_PUBLIC_IP=""
+	elif [[ -n $public_ip ]]; then
+		HANGAR_PUBLIC_IP=$public_ip
+	elif [[ -n $bind && $bind != 0.0.0.0 && $bind != 127.* ]]; then
+		# Listening on one address: browsers elsewhere reach this host there.
+		HANGAR_PUBLIC_IP=$bind
+	fi
 	# Checked before anything is created, so a bad value leaves nothing behind.
 	write_env
 	mkdir -p "$DATA"/android "$DATA"/la-pluma/{data,maa-config/profiles,maa-data}
@@ -209,7 +270,13 @@ EOF
 	return 0
 }
 
-compose() { docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$ENV_FILE" "$@"; }
+compose() {
+	local files=() f
+	IFS=: read -ra files <<<"$COMPOSE_FILE"
+	local args=(--project-directory "$ROOT" --env-file "$ENV_FILE")
+	for f in "${files[@]}"; do args+=(-f "$ROOT/$f"); done
+	docker compose "${args[@]}" "$@"
+}
 
 # ---- image ----
 
@@ -227,19 +294,22 @@ ensure_image() {
 
 # ---- Android ----
 
-adb_dev() { adb -s "$SERIAL" "$@"; }
+# A command in Android, run through the container: adb need not leave the compose network.
+android() { compose exec -T android "$@"; }
 
 wait_boot() {
-	step "Waiting for Android to boot ($SERIAL)"
+	step "Waiting for Android to boot"
 	local deadline=$((SECONDS + BOOT_TIMEOUT_S))
-	until [[ $(adb_dev shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]]; do
+	until [[ $(android getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]]; do
 		((SECONDS < deadline)) || die "Android did not boot within ${BOOT_TIMEOUT_S}s (see: ./hangar status -i $instance)"
-		adb connect "$SERIAL" >/dev/null 2>&1 || true
 		sleep 3
 	done
 }
 
-installed_version() { adb_dev shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/^ *versionName=//p' | head -1; }
+# Reads all of dumpsys's output: stopping early makes it fail with a broken pipe.
+installed_version() {
+	android dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | awk -F= '/^ *versionName=/ && v == "" { v = $2 } END { print v }'
+}
 
 latest_version() {
 	local channel=official
@@ -276,7 +346,7 @@ fetch_apk() {
 }
 
 install_game() {
-	local have want url apk
+	local have want url apk size
 	have=$(installed_version)
 	want=$(latest_version) || die "could not read the latest Arknights version"
 	if [[ -n $have && $have == "$want" ]]; then
@@ -287,7 +357,9 @@ install_game() {
 	url=$(apk_url) || die "could not find the APK download"
 	apk=$(fetch_apk "$url")
 	# The game ships ARM code only; the translation layer runs it on x86_64.
-	adb_dev install -r --abi arm64-v8a "$apk"
+	# pm reads the package from stdin, streamed through the container.
+	size=$(stat -c %s "$apk")
+	android pm install -r --abi arm64-v8a -S "$size" <"$apk"
 	[[ $(installed_version) == "$want" ]] || die "after install the version is $(installed_version), not $want"
 	[[ -z $have ]] && first_install=1
 	return 0
@@ -314,7 +386,7 @@ check_console() {
 # ---- commands ----
 
 cmd_deploy() {
-	need docker adb curl jq sha256sum
+	need docker curl jq sha256sum
 	configure_instance
 	ensure_image
 	write_maa_profile
@@ -323,14 +395,24 @@ cmd_deploy() {
 	wait_boot
 	install_game
 	check_console
-	cat <<EOF
-
-Instance "$instance" is ready.
-  Web console  $WEB   (token: LA_PLUMA_TOKEN in data/$instance/instance.env)
-  Android      adb -s $SERIAL, or ./hangar screen -i $instance
-EOF
+	printf '\nInstance "%s" is ready.\n' "$instance"
+	printf '  Web console   %s   (token: LA_PLUMA_TOKEN in data/%s/instance.env)\n' "$WEB" "$instance"
+	if [[ -n $HANGAR_PUBLIC_IP ]]; then
+		printf '  Live preview  from other machines at http://%s:%s (relay: UDP %s on every interface)\n' \
+			"$HANGAR_PUBLIC_IP" "$HANGAR_WEB_PORT" "$HANGAR_WEB_PORT"
+	elif [[ $HANGAR_BIND != 127.0.0.1 ]]; then
+		printf '  Live preview  this machine only: add --public-ip ADDR for browsers elsewhere\n'
+	fi
+	if [[ -n $SERIAL ]]; then
+		printf '  adb           %s, or ./hangar screen -i %s\n' "$SERIAL" "$instance"
+	else
+		printf '  adb           inside the compose network only (--adb-bind 127.0.0.1 publishes it)\n'
+	fi
 	if [[ $HANGAR_BIND == 0.0.0.0 ]]; then
 		printf '  The web console listens on every interface (port %s); only its token protects it.\n' "$HANGAR_WEB_PORT"
+	fi
+	if [[ $HANGAR_ADB_BIND != none && $HANGAR_ADB_BIND != 127.* ]]; then
+		printf '  adb listens on %s with no authentication: a root shell in a privileged container.\n' "$HANGAR_ADB_BIND"
 	fi
 	if [[ -n ${first_install:-} ]]; then
 		printf '  Open the game once and log in: it downloads ~12 GB of resources on first launch.\n'
@@ -339,10 +421,9 @@ EOF
 }
 
 cmd_status() {
-	need docker adb curl jq
+	need docker curl jq
 	load_env
 	compose ps
-	adb connect "$SERIAL" >/dev/null 2>&1 || true
 	printf '\nArknights (%s): %s\n' "$PKG" "$(installed_version || true)"
 	check_console || true
 }
@@ -352,11 +433,15 @@ main() {
 	(($#)) && shift
 	case $cmd in
 	deploy) parse_opts "$@"; cmd_deploy ;;
-	install-game) parse_opts "$@"; need adb curl jq; load_env; wait_boot; install_game ;;
+	install-game) parse_opts "$@"; need docker curl jq; load_env; wait_boot; install_game ;;
 	up) parse_opts "$@"; need docker; load_env; write_maa_profile; compose up -d ;;
 	down) parse_opts "$@"; need docker; load_env; compose down ;;
 	status) parse_opts "$@"; cmd_status ;;
-	screen) parse_opts "$@"; need scrcpy adb; load_env; adb connect "$SERIAL" >/dev/null
+	screen) parse_opts "$@"; need scrcpy adb; load_env
+		[[ -n $SERIAL ]] || die "adb is not published; run ./hangar deploy -i $instance --adb-bind 127.0.0.1, or use the web console's live preview"
+		# A recreated container leaves adb holding a dead connection to the same address.
+		adb disconnect "$SERIAL" >/dev/null 2>&1 || true
+		adb connect "$SERIAL" >/dev/null
 		exec scrcpy -s "$SERIAL" --no-audio --no-clipboard-autosync --window-title="Arknights · $instance" ;;
 	"" | -h | --help | help) usage ;;
 	*) die "unknown command: $cmd (see: ./hangar help)" ;;

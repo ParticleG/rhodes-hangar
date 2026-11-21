@@ -1,0 +1,7 @@
+# Added by `hangar deploy --adb-bind ADDR`: publishes Android's adb outside the
+# compose network, for scrcpy and adb on the host. Without it only La Pluma
+# reaches android:5555. adb is a root shell in a privileged container.
+services:
+  android:
+    ports:
+      - "${HANGAR_ADB_BIND:?}:${HANGAR_ADB_PORT:?}:5555"
