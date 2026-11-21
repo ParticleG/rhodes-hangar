@@ -45,9 +45,15 @@ open the game once from the console or `./hangar screen`, and log in: the game
 downloads about 12 GB of resources on its first launch.
 
 Running `deploy` again is safe: it keeps the data and token, applies the
-options given (`--server`, `--web-port`, `--adb-port`, `--gpu-node`), and
-updates the game when a newer client is out. To move an existing console in
-with its token, set `LA_PLUMA_TOKEN` in the environment for the first deploy.
+options given (`--server`, `--web-port`, `--adb-port`, `--bind`,
+`--gpu-node`), and updates the game when a newer client is out. To move an
+existing console in with its token, set `LA_PLUMA_TOKEN` in the environment for
+the first deploy.
+
+The web console listens on `127.0.0.1`. `--bind 0.0.0.0` opens it on every
+interface (or `--bind` one IPv4 address of this machine); its token is then the
+only protection, so keep it on a trusted network. adb always stays on
+`127.0.0.1`: it is a root shell in a privileged container.
 
 ## Commands
 

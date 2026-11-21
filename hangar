@@ -25,14 +25,17 @@ usage: hangar COMMAND [-i INSTANCE] [options]
                 install or update Arknights, and check that La Pluma reaches Android.
                   --server official|bilibili   game server (new instance default: official)
                   --web-port N --adb-port N    host ports (new instance default: 13055, 15556)
+                  --bind ADDR                  web console listen address: 127.0.0.1 (default),
+                                               0.0.0.0 for every interface, or one IPv4 address
                   --gpu-node PATH              render node (default: /dev/dri/renderD129)
   install-game  Install or update Arknights on a running instance.
   up | down     Start or stop an instance.
   status        Containers, game version and La Pluma's connection check.
   screen        Mirror the instance with scrcpy (audio off: this Android has no opus encoder).
 
-INSTANCE defaults to "main". Web console: http://127.0.0.1:<web-port>, token in
-data/<instance>/instance.env.
+INSTANCE defaults to "main". Web console: http://<bind>:<web-port>, token in
+data/<instance>/instance.env. adb always listens on 127.0.0.1: it is a root shell
+in a privileged container.
 EOF
 }
 
@@ -51,6 +54,7 @@ server=""
 web_port=""
 adb_port=""
 gpu_node=""
+bind=""
 
 parse_opts() {
 	while (($#)); do
@@ -60,6 +64,7 @@ parse_opts() {
 		--web-port) web_port=${2:?}; shift ;;
 		--adb-port) adb_port=${2:?}; shift ;;
 		--gpu-node) gpu_node=${2:?}; shift ;;
+		--bind) bind=${2:?}; shift ;;
 		-h | --help) usage; exit 0 ;;
 		*) die "unknown option: $1" ;;
 		esac
@@ -72,6 +77,17 @@ parse_opts() {
 	PROJECT=rhodes-hangar-$instance
 }
 
+# A dotted IPv4 address, each part 0-255 without leading zeros.
+is_ipv4() {
+	local IFS=. part
+	local -a parts
+	[[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+	read -ra parts <<<"$1"
+	for part in "${parts[@]}"; do
+		[[ $part =~ ^(0|[1-9][0-9]*)$ ]] && ((part <= 255)) || return 1
+	done
+}
+
 client_of() { [[ $1 == bilibili ]] && echo Bilibili || echo Official; }
 
 # instance.env is read by this script and by `docker compose --env-file`, which
@@ -82,6 +98,7 @@ check_field() {
 	HANGAR_INSTANCE) [[ $value =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] && ok=1 ;;
 	HANGAR_CLIENT_TYPE) [[ $value == Official || $value == Bilibili ]] && ok=1 ;;
 	HANGAR_WEB_PORT | HANGAR_ADB_PORT) [[ $value =~ ^[1-9][0-9]{0,4}$ ]] && ((value <= 65535)) && ok=1 ;;
+	HANGAR_BIND) is_ipv4 "$value" && ok=1 ;;
 	HANGAR_GPU_NODE) [[ $value =~ ^/dev/dri/[A-Za-z0-9_]+$ ]] && ok=1 ;;
 	LA_PLUMA_TOKEN) [[ $value =~ ^[A-Za-z0-9._~+/=-]{16,256}$ ]] && ok=1 ;;
 	*) die "$ENV_FILE: unknown setting $key" ;;
@@ -94,7 +111,7 @@ check_field() {
 	esac
 }
 
-ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_WEB_PORT HANGAR_ADB_PORT HANGAR_GPU_NODE LA_PLUMA_TOKEN)
+ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_BIND HANGAR_WEB_PORT HANGAR_ADB_PORT HANGAR_GPU_NODE LA_PLUMA_TOKEN)
 
 # Writes instance.env from the current values; the token never leaves the file.
 write_env() {
@@ -126,10 +143,13 @@ load_env() {
 		check_field "$key" "$value"
 		printf -v "$key" '%s' "$value"
 	done <"$ENV_FILE"
+	# Files written before --bind existed listen on localhost.
+	HANGAR_BIND=${HANGAR_BIND:-127.0.0.1}
 	for key in "${ENV_KEYS[@]}"; do [[ -n ${!key:-} ]] || die "$ENV_FILE: $key is missing"; done
 	[[ $HANGAR_INSTANCE == "$instance" ]] || die "$ENV_FILE belongs to instance $HANGAR_INSTANCE"
 	SERIAL=127.0.0.1:$HANGAR_ADB_PORT
-	WEB=http://127.0.0.1:$HANGAR_WEB_PORT
+	# This script reaches the console locally; 0.0.0.0 includes the loopback address.
+	WEB=http://$([[ $HANGAR_BIND == 0.0.0.0 ]] && echo 127.0.0.1 || echo "$HANGAR_BIND"):$HANGAR_WEB_PORT
 	if [[ $HANGAR_CLIENT_TYPE == Bilibili ]]; then
 		PKG=com.hypergryph.arknights.bilibili
 	else
@@ -146,6 +166,7 @@ configure_instance() {
 		HANGAR_CLIENT_TYPE=Official
 		HANGAR_WEB_PORT=13055
 		HANGAR_ADB_PORT=15556
+		HANGAR_BIND=127.0.0.1
 		HANGAR_GPU_NODE=/dev/dri/renderD129
 		# A token in the environment is kept, as when moving an existing console here.
 		LA_PLUMA_TOKEN=${LA_PLUMA_TOKEN:-$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')}
@@ -154,6 +175,7 @@ configure_instance() {
 		HANGAR_CLIENT_TYPE=$(client_of "$server")
 	fi
 	HANGAR_WEB_PORT=${web_port:-$HANGAR_WEB_PORT}
+	HANGAR_BIND=${bind:-$HANGAR_BIND}
 	HANGAR_ADB_PORT=${adb_port:-$HANGAR_ADB_PORT}
 	HANGAR_GPU_NODE=${gpu_node:-$HANGAR_GPU_NODE}
 	# Checked before anything is created, so a bad value leaves nothing behind.
@@ -307,6 +329,9 @@ Instance "$instance" is ready.
   Web console  $WEB   (token: LA_PLUMA_TOKEN in data/$instance/instance.env)
   Android      adb -s $SERIAL, or ./hangar screen -i $instance
 EOF
+	if [[ $HANGAR_BIND == 0.0.0.0 ]]; then
+		printf '  The web console listens on every interface (port %s); only its token protects it.\n' "$HANGAR_WEB_PORT"
+	fi
 	if [[ -n ${first_install:-} ]]; then
 		printf '  Open the game once and log in: it downloads ~12 GB of resources on first launch.\n'
 	fi

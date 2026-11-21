@@ -33,7 +33,8 @@ services:
     depends_on:
       - android
     ports:
-      - "127.0.0.1:${HANGAR_WEB_PORT:?}:3000"
+      # Listen address from --bind (default localhost); adb above stays on localhost.
+      - "${HANGAR_BIND:-127.0.0.1}:${HANGAR_WEB_PORT:?}:3000"
     environment:
       ADB_ADDRESS: android:5555
       # Official or Bilibili: the client MAA starts and operates by default.
