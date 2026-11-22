@@ -25,6 +25,13 @@ COPY --from=upstream /vendor/etc/init/redroid.common.rc /rc/vendor/etc/init/redr
 RUN for f in /rc/system/etc/init/hw/init.rc /rc/system/etc/init/*.rc /rc/vendor/etc/init/*.rc; do \
       awk '$1 == "write" && $2 ~ /^\/proc\/sys\/(kernel|vm|abi)\// { next } $1 == "mount" && ($2 == "tracefs" || $2 == "debugfs") { next } /^[^#]*\/(sys\/kernel\/(debug|tracing)|sys\/power\/|sys\/module\/|proc\/sysrq-trigger|extra_free_kbytes\.sh)/ && $1 != "file" { next } { print }' "$f" > "$f.new" && mv "$f.new" "$f" || exit 1; \
     done
+# Use Codec2 (media.swcodec) instead of OMX. redroid turns it off for hosts
+# without a DMA-BUF heap; with one, the 32-bit OMX H.264 encoder that scrcpy and
+# the live preview would otherwise use aborts in pthread_join after hours of
+# encoding, and every abort spawned a nested crash_dump32 chain that filled the
+# container's thread limit (2026-11-22). Fails the build if the line moves.
+RUN f=/rc/vendor/etc/init/redroid.common.rc && \
+    awk '$1 == "setprop" && $2 == "debug.stagefright.ccodec" { $3 = "4"; n++ } { print } END { if (n != 1) exit 1 }' "$f" > "$f.new" && mv "$f.new" "$f"
 
 FROM protected AS avd34
 COPY --from=bridge /payload/system/ /system/

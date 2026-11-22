@@ -6,7 +6,7 @@
 name: rhodes-hangar-${HANGAR_INSTANCE:?}
 services:
   android:
-    image: local/rhodes-hangar-redroid:14-avd34
+    image: local/rhodes-hangar-redroid:14-avd34-c2
     pull_policy: never
     privileged: true
     # Contain a runaway guest (2026-11-19: a crash_dump32 storm filled the host's 24 CPUs).

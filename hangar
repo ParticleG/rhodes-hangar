@@ -7,7 +7,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-IMAGE=local/rhodes-hangar-redroid:14-avd34
+# A new tag whenever image/ changes, so deploy builds it and moves instances over.
+IMAGE=local/rhodes-hangar-redroid:14-avd34-c2
 REDROID_BASE=redroid/redroid@sha256:a3e654caad74faed03cd5ead057a989e06f507778cda678e5d3b9772e0092f1c
 # ER5TT/ndk 9ecefe66 (Google AVD 34 ext12 r01 ARM translation); codeload serves this tarball byte for byte.
 NDK_URL=https://codeload.github.com/ER5TT/ndk/tar.gz/9ecefe66bb78e3347bbac7d2237befebd0552c15

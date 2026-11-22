@@ -34,7 +34,7 @@ are optional, for `hangar screen`.
 
 The first deploy:
 
-1. Builds `local/rhodes-hangar-redroid:14-avd34` from `image/`, downloading the
+1. Builds `local/rhodes-hangar-redroid:14-avd34-c2` from `image/`, downloading the
    translation layer at a pinned commit and checksum.
 2. Creates `data/main/` and `instance.env` with a random access token.
 3. Writes MAA's connection profile and starts both containers.
