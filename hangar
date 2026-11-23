@@ -29,9 +29,11 @@ usage: hangar COMMAND [-i INSTANCE] [options]
                                                the live preview relay uses UDP on the same number
                   --bind ADDR                  web console listen address: 127.0.0.1 (default),
                                                0.0.0.0 for every interface, or one IPv4 address
-                  --public-ip ADDR|none        the IPv4 address other machines reach this host at;
-                                               lets their browsers show the live preview
-                                               (default: the --bind address when it is one)
+                  --public-ip ADDR|none        the IPv4 address or domain name other machines
+                                               reach this host at; lets their browsers show the
+                                               live preview (default: the --bind address when
+                                               it is one). A domain is resolved now and by
+                                               refresh-ip; La Pluma itself takes only an address
                   --adb-bind ADDR|none         publish adb outside the compose network:
                                                none (default), 127.0.0.1, or another address
                   --adb-port N                 adb host port when published (default: 15556)
@@ -39,6 +41,9 @@ usage: hangar COMMAND [-i INSTANCE] [options]
   install-game  Install or update Arknights on a running instance.
   up | down     Start or stop an instance.
   status        Containers, game version and La Pluma's connection check.
+  refresh-ip    Resolve the --public-ip domain again; when its address moved, restart
+                La Pluma with it (not while MAA is running).
+                  --timer on|off               check every 5 minutes with a systemd user timer
   screen        Mirror the instance with scrcpy (needs --adb-bind; audio off: this
                 Android has no opus encoder).
 
@@ -65,6 +70,7 @@ gpu_node=""
 bind=""
 public_ip=""
 adb_bind=""
+timer=""
 
 parse_opts() {
 	while (($#)); do
@@ -77,6 +83,7 @@ parse_opts() {
 		--bind) bind=${2:?}; shift ;;
 		--public-ip) public_ip=${2:?}; shift ;;
 		--adb-bind) adb_bind=${2:?}; shift ;;
+		--timer) timer=${2:?}; shift ;;
 		-h | --help) usage; exit 0 ;;
 		*) die "unknown option: $1" ;;
 		esac
@@ -84,6 +91,7 @@ parse_opts() {
 	done
 	[[ $instance =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "instance names use a-z, 0-9 and -"
 	case $server in "" | official | bilibili) ;; *) die "--server is official or bilibili" ;; esac
+	case $timer in "" | on | off) ;; *) die "--timer is on or off" ;; esac
 	DATA=$ROOT/data/$instance
 	ENV_FILE=$DATA/instance.env
 	PROJECT=rhodes-hangar-$instance
@@ -111,7 +119,8 @@ check_field() {
 	HANGAR_CLIENT_TYPE) [[ $value == Official || $value == Bilibili ]] && ok=1 ;;
 	HANGAR_WEB_PORT | HANGAR_ADB_PORT) [[ $value =~ ^[1-9][0-9]{0,4}$ ]] && ((value <= 65535)) && ok=1 ;;
 	HANGAR_BIND) is_ipv4 "$value" && ok=1 ;;
-	HANGAR_PUBLIC_IP) [[ -z $value ]] || { is_ipv4 "$value" && [[ $value != 0.0.0.0 && $value != 127.* ]]; } && ok=1 ;;
+	HANGAR_PUBLIC_IP) [[ -z $value ]] || is_public_ipv4 "$value" && ok=1 ;;
+	HANGAR_PUBLIC_ADDR) [[ -z $value ]] || is_public_ipv4 "$value" || is_hostname "$value" && ok=1 ;;
 	HANGAR_TURN_BIND) [[ $value == 127.0.0.1 || $value == 0.0.0.0 ]] && ok=1 ;;
 	HANGAR_ADB_BIND) [[ $value == none ]] || is_ipv4 "$value" && ok=1 ;;
 	HANGAR_GPU_NODE) [[ $value =~ ^/dev/dri/[A-Za-z0-9_]+$ ]] && ok=1 ;;
@@ -125,21 +134,46 @@ check_field() {
 	LA_PLUMA_TOKEN) die "LA_PLUMA_TOKEN must be 16-256 characters of A-Z a-z 0-9 . _ ~ + / = -" ;;
 	HANGAR_GPU_NODE) die "the GPU node must look like /dev/dri/renderD129, not: $value" ;;
 	HANGAR_PUBLIC_IP) die "the public IP is an IPv4 address other machines reach this host at, not: $value" ;;
+	HANGAR_PUBLIC_ADDR) die "--public-ip takes an IPv4 address or a domain name other machines reach this host at, not: $value" ;;
 	HANGAR_ADB_BIND) die "the adb address is none or an IPv4 address, not: $value" ;;
 	*) die "invalid $key: $value" ;;
 	esac
 }
 
-ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_BIND HANGAR_WEB_PORT HANGAR_PUBLIC_IP HANGAR_TURN_BIND
+ENV_KEYS=(HANGAR_INSTANCE HANGAR_CLIENT_TYPE HANGAR_BIND HANGAR_WEB_PORT HANGAR_PUBLIC_ADDR HANGAR_PUBLIC_IP HANGAR_TURN_BIND
 	HANGAR_ADB_BIND HANGAR_ADB_PORT HANGAR_GPU_NODE LA_PLUMA_TOKEN HANGAR_TURN_PASSWORD COMPOSE_FILE)
 
 random_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+
+# An address other machines can be told to reach: not a wildcard or loopback.
+is_public_ipv4() { is_ipv4 "$1" && [[ $1 != 0.0.0.0 && $1 != 127.* ]]; }
+
+# A DNS name of letters, digits and hyphens with at least one dot, as DDNS hands out.
+is_hostname() {
+	((${#1} <= 253)) && [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+# The IPv4 address a public resolver gives for a name, following CNAMEs. DNS over
+# HTTPS, as the system resolver may answer with a proxy's fake address (Mihomo's
+# fake-ip range, 198.18.0.0/15).
+resolve_ipv4() {
+	local url ip
+	for url in "https://dns.alidns.com/resolve?name=$1&type=A" "https://cloudflare-dns.com/dns-query?name=$1&type=A"; do
+		ip=$(curl -fsS --max-time 10 -H 'accept: application/dns-json' "$url" 2>/dev/null |
+			jq -r '[.Answer[]? | select(.type == 1) | .data] | last // empty' 2>/dev/null) || ip=""
+		if [[ -n $ip ]] && is_public_ipv4 "$ip"; then
+			printf '%s\n' "$ip"
+			return 0
+		fi
+	done
+	return 1
+}
 
 # Values that follow from the settings, written out for plain `docker compose`.
 derive() {
 	# The relay only matters to other machines; it opens to them with a public IP.
 	# shellcheck disable=SC2034 # written out by write_env through ${!key}
-	HANGAR_TURN_BIND=$([[ -n $HANGAR_PUBLIC_IP ]] && echo 0.0.0.0 || echo 127.0.0.1)
+	HANGAR_TURN_BIND=$([[ -n $HANGAR_PUBLIC_ADDR ]] && echo 0.0.0.0 || echo 127.0.0.1)
 	COMPOSE_FILE=compose.yaml
 	if [[ $HANGAR_ADB_BIND != none ]]; then
 		COMPOSE_FILE=compose.yaml:compose.adb.yaml
@@ -181,13 +215,15 @@ load_env() {
 	# Settings added after the first release keep their defaults when absent.
 	HANGAR_BIND=${HANGAR_BIND:-127.0.0.1}
 	HANGAR_PUBLIC_IP=${HANGAR_PUBLIC_IP:-}
+	# Before domains were accepted, the address was the setting itself.
+	[[ -v HANGAR_PUBLIC_ADDR ]] || HANGAR_PUBLIC_ADDR=$HANGAR_PUBLIC_IP
 	HANGAR_ADB_BIND=${HANGAR_ADB_BIND:-none}
 	derive
 	if [[ -z ${HANGAR_TURN_PASSWORD:-} && -n $upgrading ]]; then
 		HANGAR_TURN_PASSWORD=$(random_hex 16)
 	fi
 	for key in "${ENV_KEYS[@]}"; do
-		[[ $key == HANGAR_PUBLIC_IP || -n ${!key:-} ]] && continue
+		[[ $key == HANGAR_PUBLIC_IP || $key == HANGAR_PUBLIC_ADDR || -n ${!key:-} ]] && continue
 		[[ $key == HANGAR_TURN_PASSWORD ]] && die "$ENV_FILE is from an older hangar; run: ./hangar deploy -i $instance"
 		die "$ENV_FILE: $key is missing"
 	done
@@ -216,7 +252,7 @@ configure_instance() {
 		HANGAR_CLIENT_TYPE=Official
 		HANGAR_WEB_PORT=13055
 		HANGAR_BIND=127.0.0.1
-		HANGAR_PUBLIC_IP=""
+		HANGAR_PUBLIC_ADDR=""
 		HANGAR_ADB_BIND=none
 		HANGAR_ADB_PORT=15556
 		HANGAR_GPU_NODE=/dev/dri/renderD129
@@ -233,15 +269,21 @@ configure_instance() {
 	HANGAR_ADB_PORT=${adb_port:-$HANGAR_ADB_PORT}
 	HANGAR_GPU_NODE=${gpu_node:-$HANGAR_GPU_NODE}
 	if [[ $public_ip == none ]]; then
-		HANGAR_PUBLIC_IP=""
+		HANGAR_PUBLIC_ADDR=""
 	elif [[ -n $public_ip ]]; then
-		HANGAR_PUBLIC_IP=$public_ip
+		HANGAR_PUBLIC_ADDR=$public_ip
 	elif [[ $bind == 127.* ]]; then
 		# Back to this machine only: the relay closes with the console.
-		HANGAR_PUBLIC_IP=""
+		HANGAR_PUBLIC_ADDR=""
 	elif [[ -n $bind && $bind != 0.0.0.0 ]]; then
 		# Listening on one address: browsers elsewhere reach this host there.
-		HANGAR_PUBLIC_IP=$bind
+		HANGAR_PUBLIC_ADDR=$bind
+	fi
+	check_field HANGAR_PUBLIC_ADDR "$HANGAR_PUBLIC_ADDR"
+	if is_hostname "$HANGAR_PUBLIC_ADDR"; then
+		HANGAR_PUBLIC_IP=$(resolve_ipv4 "$HANGAR_PUBLIC_ADDR") || die "could not resolve $HANGAR_PUBLIC_ADDR to an IPv4 address"
+	else
+		HANGAR_PUBLIC_IP=$HANGAR_PUBLIC_ADDR
 	fi
 	# Checked before anything is created, so a bad value leaves nothing behind.
 	write_env
@@ -401,9 +443,15 @@ cmd_deploy() {
 	check_console
 	printf '\nInstance "%s" is ready.\n' "$instance"
 	printf '  Web console   %s   (token: LA_PLUMA_TOKEN in data/%s/instance.env)\n' "$WEB" "$instance"
-	if [[ -n $HANGAR_PUBLIC_IP ]]; then
-		printf '  Live preview  from other machines at http://%s:%s (relay: UDP %s on every interface)\n' \
-			"$HANGAR_PUBLIC_IP" "$HANGAR_WEB_PORT" "$HANGAR_WEB_PORT"
+	if is_hostname "$HANGAR_PUBLIC_ADDR"; then
+		printf '  Live preview  from other machines through %s, now %s (relay: UDP %s on every interface)\n' \
+			"$HANGAR_PUBLIC_ADDR" "$HANGAR_PUBLIC_IP" "$HANGAR_WEB_PORT"
+		if ! systemctl --user is-enabled --quiet "$(timer_unit).timer" 2>/dev/null; then
+			printf '                La Pluma keeps that address until told: ./hangar refresh-ip -i %s --timer on\n' "$instance"
+		fi
+	elif [[ -n $HANGAR_PUBLIC_IP ]]; then
+		printf '  Live preview  from other machines at %s (relay: UDP %s on every interface)\n' \
+			"$HANGAR_PUBLIC_IP" "$HANGAR_WEB_PORT"
 	elif [[ $HANGAR_BIND != 127.0.0.1 ]]; then
 		printf '  Live preview  this machine only: add --public-ip ADDR for browsers elsewhere\n'
 	fi
@@ -432,6 +480,91 @@ cmd_status() {
 	check_console || true
 }
 
+# Whether La Pluma is running MAA now; restarting it would cut the run off.
+console_busy() {
+	lapluma "$WEB/api/agent/runs/current?lines=0" 2>/dev/null |
+		jq -e '.data | .isRunning or .schedule.isRunning or .task.isRunning or ((.lease.state // "free") != "free")' >/dev/null
+}
+
+cmd_refresh_ip() {
+	need docker curl jq
+	load_env
+	if [[ -n $timer ]]; then
+		set_timer "$timer"
+		return
+	fi
+	if ! is_hostname "$HANGAR_PUBLIC_ADDR"; then
+		printf 'Instance "%s" has no --public-ip domain; nothing to resolve.\n' "$instance"
+		return 0
+	fi
+	local ip
+	ip=$(resolve_ipv4 "$HANGAR_PUBLIC_ADDR") || die "could not resolve $HANGAR_PUBLIC_ADDR to an IPv4 address"
+	if [[ $ip == "$HANGAR_PUBLIC_IP" ]]; then
+		printf '%s is still %s.\n' "$HANGAR_PUBLIC_ADDR" "$ip"
+		return 0
+	fi
+	if [[ -z $(compose ps -q --status running la-pluma 2>/dev/null) ]]; then
+		HANGAR_PUBLIC_IP=$ip
+		write_env
+		printf '%s moved to %s; La Pluma is not running and starts with it.\n' "$HANGAR_PUBLIC_ADDR" "$ip"
+		return 0
+	fi
+	# The settings stay as they were, so the next check tries again.
+	if console_busy; then
+		printf '%s moved to %s, but MAA is running; La Pluma restarts at a later check.\n' "$HANGAR_PUBLIC_ADDR" "$ip"
+		return 0
+	fi
+	step "$HANGAR_PUBLIC_ADDR moved from $HANGAR_PUBLIC_IP to $ip; restarting La Pluma"
+	HANGAR_PUBLIC_IP=$ip
+	write_env
+	compose up -d la-pluma
+	check_console
+}
+
+timer_unit() { printf 'rhodes-hangar-refresh-ip-%s' "$instance"; }
+
+# A systemd user timer that runs refresh-ip for this instance every 5 minutes.
+set_timer() {
+	need systemctl
+	local unit dir
+	unit=$(timer_unit)
+	dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+	if [[ $1 == off ]]; then
+		systemctl --user disable --now "$unit.timer" 2>/dev/null || true
+		rm -f "$dir/$unit.service" "$dir/$unit.timer"
+		systemctl --user daemon-reload
+		printf 'Timer %s removed.\n' "$unit"
+		return 0
+	fi
+	is_hostname "$HANGAR_PUBLIC_ADDR" || die "instance \"$instance\" has no --public-ip domain to follow"
+	mkdir -p "$dir"
+	cat >"$dir/$unit.service" <<EOF
+[Unit]
+Description=rhodes-hangar: follow $HANGAR_PUBLIC_ADDR for instance $instance's live preview relay
+
+[Service]
+Type=oneshot
+ExecStart="$ROOT/hangar" refresh-ip -i $instance
+EOF
+	cat >"$dir/$unit.timer" <<EOF
+[Unit]
+Description=rhodes-hangar: check $HANGAR_PUBLIC_ADDR every 5 minutes for instance $instance
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload
+	systemctl --user enable --now "$unit.timer"
+	printf 'Timer %s checks %s every 5 minutes; log: journalctl --user -u %s.service\n' "$unit" "$HANGAR_PUBLIC_ADDR" "$unit"
+	if [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) != yes ]]; then
+		printf 'It runs while you are logged in; to keep it running after logout: loginctl enable-linger %s\n' "$USER"
+	fi
+}
+
 main() {
 	local cmd=${1:-}
 	(($#)) && shift
@@ -441,6 +574,7 @@ main() {
 	up) parse_opts "$@"; need docker; load_env; write_maa_profile; compose up -d ;;
 	down) parse_opts "$@"; need docker; load_env; compose down ;;
 	status) parse_opts "$@"; cmd_status ;;
+	refresh-ip) parse_opts "$@"; cmd_refresh_ip ;;
 	screen) parse_opts "$@"; need scrcpy adb; load_env
 		[[ -n $SERIAL ]] || die "adb is not published; run ./hangar deploy -i $instance --adb-bind 127.0.0.1, or use the web console's live preview"
 		# A recreated container leaves adb holding a dead connection to the same address.

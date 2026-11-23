@@ -68,7 +68,7 @@ The web console listens on `127.0.0.1`. Another machine needs two paths to it:
 | Path | What it carries | How it opens |
 | --- | --- | --- |
 | TCP `<web-port>` | The console, its API and the preview's signaling | `--bind 0.0.0.0` or `--bind` one IPv4 address of this host |
-| UDP `<web-port>` | The live preview's video and touch input, through La Pluma's own TURN relay | `--public-ip ADDR`: the IPv4 address the other machine reaches this host at |
+| UDP `<web-port>` | The live preview's video and touch input, through La Pluma's own TURN relay | `--public-ip ADDR`: the IPv4 address or domain name the other machine reaches this host at |
 
 The relay is needed because the preview is WebRTC: without a public IP La Pluma
 offers browsers only the container's address (`172.x`), which no other machine
@@ -87,13 +87,35 @@ collide, and its password is random per instance; browsers receive it only after
 logging in with the token. MAA and every other console feature work the same
 from any machine: La Pluma reaches Android over the compose network.
 
+### A domain for a changing address (DDNS)
+
+La Pluma reads the relay address once at start and takes only an IP address (a
+domain there is silently ignored), so hangar resolves `--public-ip DOMAIN`
+itself: at `deploy`, and again at each `./hangar refresh-ip`, which restarts
+La Pluma (only that container) when the address moved. It resolves over DNS
+over HTTPS (AliDNS, then Cloudflare): a proxy such as Mihomo in fake-ip mode
+answers the system resolver with `198.18.x` addresses. A refresh that finds MAA
+running leaves La Pluma alone and the setting unchanged, so the next one tries
+again.
+
+```sh
+./hangar deploy --bind 10.100.200.1 --public-ip office.example.org
+./hangar refresh-ip --timer on    # systemd user timer: refresh-ip every 5 minutes
+./hangar refresh-ip --timer off
+```
+
+The timer runs while the user is logged in; `loginctl enable-linger` keeps it
+running without a session. Between a change and the next check (up to 5
+minutes), browsers elsewhere get the old address and the preview stays blank;
+the console itself keeps working.
+
 Over the internet:
 
 - **Prefer a private network** such as Tailscale or WireGuard: `--bind` and
   `--public-ip` take this host's address there, and nothing is exposed publicly.
 - **Public exposure** needs TCP and UDP `<web-port>` forwarded to this host,
-  `--public-ip` set to the public IPv4 address (an address, not a domain; update
-  it when it changes), and TLS in front of the console: it speaks plain HTTP,
+  `--public-ip` set to the public address or a DDNS name for it (see above), and
+  TLS in front of the console: it speaks plain HTTP,
   so the token would cross the internet in clear text. La Pluma's own README
   covers both ways: its built-in HTTPS (`LA_PLUMA_HTTPS_CERT_PATH` and
   `LA_PLUMA_HTTPS_KEY_PATH`), or a reverse proxy forwarding `/`, `/api`,
@@ -113,6 +135,7 @@ Over the internet:
 | `./hangar up` / `down [-i NAME]` | Start or stop an instance |
 | `./hangar status [-i NAME]` | Containers, game version, La Pluma's connection check |
 | `./hangar screen [-i NAME]` | Mirror the instance with scrcpy (needs `--adb-bind`) |
+| `./hangar refresh-ip [-i NAME] [--timer on\|off]` | Resolve the `--public-ip` domain again and restart La Pluma if it moved |
 
 `-i NAME` picks the instance (default `main`). A second instance needs its own
 web port (and adb port, if published): `./hangar deploy -i alt --web-port 13066`.
