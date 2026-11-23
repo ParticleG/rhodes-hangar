@@ -1,0 +1,14 @@
+# The live preview relay every instance with --public-ip shares: one coturn on
+# UDP 3478 of this host, so the router forwards one port however many instances
+# run. `hangar deploy` and `hangar up` write data/relay/turnserver.conf (a user
+# per instance, peers limited to the instances' compose networks) and start or
+# stop this project; it runs as the invoking user, so that file stays mode 600.
+name: rhodes-hangar-relay
+services:
+  coturn:
+    image: coturn/coturn@sha256:ccdbc51e6f072130b0fc9eebda21f8d026d0a25581746c52557e887818011a3f
+    # Host network: relayed traffic reaches La Pluma at its compose network address.
+    network_mode: host
+    user: "${HANGAR_UID:?}:${HANGAR_GID:?}"
+    volumes:
+      - ./data/relay/turnserver.conf:/etc/coturn/turnserver.conf:ro

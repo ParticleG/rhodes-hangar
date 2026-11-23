@@ -32,18 +32,18 @@ services:
     ports:
       # Listen address from --bind (default localhost).
       - "${HANGAR_BIND:-127.0.0.1}:${HANGAR_WEB_PORT:?}:3000"
-      # La Pluma's TURN relay, through which browsers on other machines receive the
-      # live preview: UDP on the web port's number, on every interface once
-      # --public-ip is set, else localhost (this machine needs no relay).
-      - "${HANGAR_TURN_BIND:-127.0.0.1}:${HANGAR_WEB_PORT}:${HANGAR_WEB_PORT}/udp"
     environment:
       ADB_ADDRESS: android:5555
       # Official or Bilibili: the client MAA starts and operates by default.
       MAA_CLIENT_TYPE: ${HANGAR_CLIENT_TYPE:?}
       LA_PLUMA_TOKEN: ${LA_PLUMA_TOKEN:?}
-      LA_PLUMA_WEBRTC_TURN_PORT: ${HANGAR_WEB_PORT}
-      # The address browsers get for the relay; empty: the container's own address.
+      # The live preview's TURN relay, as browsers are told of it. With --public-ip:
+      # the shared coturn (relay.compose.yaml) at that address, UDP 3478, which
+      # knows this instance by the user and password below. Without: La Pluma's own
+      # relay at the container's address, which only this host reaches.
       LA_PLUMA_WEBRTC_TURN_PUBLIC_IP: ${HANGAR_PUBLIC_IP:-}
+      LA_PLUMA_WEBRTC_TURN_PORT: "3478"
+      LA_PLUMA_WEBRTC_TURN_USERNAME: hangar-${HANGAR_INSTANCE}
       LA_PLUMA_WEBRTC_TURN_PASSWORD: ${HANGAR_TURN_PASSWORD:?run ./hangar deploy to upgrade this instance}
     volumes:
       - ./data/${HANGAR_INSTANCE}/la-pluma/data:/app/data

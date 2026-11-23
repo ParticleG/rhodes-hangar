@@ -68,12 +68,13 @@ The web console listens on `127.0.0.1`. Another machine needs two paths to it:
 | Path | What it carries | How it opens |
 | --- | --- | --- |
 | TCP `<web-port>` | The console, its API and the preview's signaling | `--bind 0.0.0.0` or `--bind` one IPv4 address of this host |
-| UDP `<web-port>` | The live preview's video and touch input, through La Pluma's own TURN relay | `--public-ip ADDR`: the IPv4 address or domain name the other machine reaches this host at |
+| UDP 3478 | The live preview's video and touch input, through the shared TURN relay | `--public-ip ADDR`: the IPv4 address or domain name the other machine reaches this host at |
 
 The relay is needed because the preview is WebRTC: without a public IP La Pluma
-offers browsers only the container's address (`172.x`), which no other machine
-reaches, and the console loads while its preview stays blank. With `--bind` set
-to one address, `--public-ip` defaults to it, and `--bind 127.0.0.1` clears it:
+offers browsers only its own relay at the container's address (`172.x`), which
+no other machine reaches, and the console loads while its preview stays blank.
+With `--bind` set to one address, `--public-ip` defaults to it, and
+`--bind 127.0.0.1` clears it:
 
 ```sh
 ./hangar deploy --bind 192.168.1.20                     # LAN: console and preview
@@ -82,10 +83,24 @@ to one address, `--public-ip` defaults to it, and `--bind 127.0.0.1` clears it:
 ./hangar deploy --bind 127.0.0.1 --public-ip 203.0.113.7 # console behind a local TLS proxy, relay public
 ```
 
-Each instance's relay uses its own web port number, so instances do not
-collide, and its password is random per instance; browsers receive it only after
-logging in with the token. MAA and every other console feature work the same
-from any machine: La Pluma reaches Android over the compose network.
+### The shared relay
+
+Every instance with `--public-ip` tells browsers of one relay: coturn on UDP
+3478 of this host (`relay.compose.yaml`, project `rhodes-hangar-relay`, host
+network), so the router forwards one UDP port however many instances run.
+`deploy` and `up` write `data/relay/turnserver.conf` (mode 600; coturn runs as
+the invoking user) with a user `hangar-<instance>` and its random password for
+each such instance, relay to that instance's compose network only, and start,
+restart or stop the relay to match. Wrong credentials get 401; a peer outside
+the instances' networks (the LAN, the internet) gets 403. La Pluma's own relay
+still runs inside each container, unpublished.
+
+Why not one port per instance behind a UDP proxy (Caddy's layer4 plugin, say):
+a TURN client's first packets (a STUN binding request, an unauthenticated
+allocate) carry nothing that names the instance, and La Pluma advertises only
+its own relay, so one relay that knows every instance is the way to share a
+port. MAA and every other console feature work the same from any machine: La
+Pluma reaches Android over the compose network.
 
 ### A domain for a changing address (DDNS)
 
@@ -116,16 +131,29 @@ Over the internet:
 
 - **Prefer a private network** such as Tailscale or WireGuard: `--bind` and
   `--public-ip` take this host's address there, and nothing is exposed publicly.
-- **Public exposure** needs TCP and UDP `<web-port>` forwarded to this host,
-  `--public-ip` set to the public address or a DDNS name for it (see above), and
-  TLS in front of the console: it speaks plain HTTP,
-  so the token would cross the internet in clear text. La Pluma's own README
-  covers both ways: its built-in HTTPS (`LA_PLUMA_HTTPS_CERT_PATH` and
-  `LA_PLUMA_HTTPS_KEY_PATH`), or a reverse proxy forwarding `/`, `/api`,
-  `/health` and `/webrtc-signaling` with the WebSocket upgrade. Neither is
-  tested here. The relay's UDP goes straight to this host. Browsers on this
-  host's own LAN then reach the relay at the public address only if the router
-  supports hairpin NAT.
+- **Public exposure** needs the console behind TLS (it speaks plain HTTP, so the
+  token would cross the internet in clear text), UDP 3478 forwarded to this
+  host, and `--public-ip` set to the public address or a DDNS name for it.
+  Browsers on this host's own LAN reach the relay at the public address only if
+  the router also NATs that traffic back in (hairpin NAT).
+- **One subdomain per instance**: La Pluma serves `/api` and `/webrtc-signaling`
+  at the origin root, ignores its base path for both, and keeps its token in the
+  browser's storage for the origin, so instances cannot share a host by path. A
+  wildcard DNS name and a reverse proxy routing by host work; with Caddy (it
+  proxies the signaling WebSocket by itself; a wildcard certificate needs a DNS
+  challenge):
+
+  ```caddyfile
+  *.hangar.example.org {
+  	@main host main.hangar.example.org
+  	handle @main {
+  		reverse_proxy 192.168.1.20:13055
+  	}
+  	handle {
+  		respond "No such instance" 404
+  	}
+  }
+  ```
 - The console is a single token away from controlling the game account; the
   token is the only access control.
 
