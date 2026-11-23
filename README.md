@@ -90,10 +90,13 @@ Every instance with `--public-ip` tells browsers of one relay: coturn on UDP
 network), so the router forwards one UDP port however many instances run.
 `deploy` and `up` write `data/relay/turnserver.conf` (mode 600; coturn runs as
 the invoking user) with a user `hangar-<instance>` and its random password for
-each such instance, relay to that instance's compose network only, and start,
-restart or stop the relay to match. Wrong credentials get 401; a peer outside
-the instances' networks (the LAN, the internet) gets 403. La Pluma's own relay
-still runs inside each container, unpublished.
+each such instance, allow relaying to that instance's La Pluma container
+address only (not its network's gateway, which is this host, nor Android; the
+allow list is shared by all users), and start, restart or stop the relay to
+match. Wrong credentials get 401; any other peer gets 403. A container that
+Docker gives a new address, after a manual restart say, is picked up by the
+next `./hangar up`. La Pluma's own relay still runs inside each container,
+unpublished.
 
 Why not one port per instance behind a UDP proxy (Caddy's layer4 plugin, say):
 a TURN client's first packets (a STUN binding request, an unauthenticated

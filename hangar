@@ -332,21 +332,12 @@ relay_compose() {
 		--env-file /dev/null -f "$ROOT/relay.compose.yaml" "$@"
 }
 
-# "172.30.0.0/16" as the range coturn takes: "172.30.0.0-172.30.255.255".
-cidr_range() {
-	local a b c d bits=${1#*/} n mask lo hi
-	IFS=. read -r a b c d <<<"${1%/*}"
-	n=$(((a << 24) | (b << 16) | (c << 8) | d))
-	mask=$(((0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF))
-	lo=$((n & mask)) hi=$(((n & mask) | (~mask & 0xFFFFFFFF)))
-	printf '%d.%d.%d.%d-%d.%d.%d.%d\n' $((lo >> 24)) $((lo >> 16 & 255)) $((lo >> 8 & 255)) $((lo & 255)) \
-		$((hi >> 24)) $((hi >> 16 & 255)) $((hi >> 8 & 255)) $((hi & 255))
-}
-
-# The relay's user and allowed peers for every instance with --public-ip: its
-# La Pluma is reached on its compose network, so only that subnet is relayed to.
+# The relay's user and allowed peer for every instance with --public-ip: its La
+# Pluma container's address alone. Not the whole compose network, whose gateway
+# is this host and which holds Android; and the allow list is shared by all
+# users, so a wider one would let one instance's credentials reach the others.
 relay_entries() {
-	local env name subnet
+	local env name ip
 	for env in "$ROOT"/data/*/instance.env; do
 		[[ -f $env ]] || continue
 		name=$(basename "$(dirname "$env")")
@@ -355,8 +346,8 @@ relay_entries() {
 			load_env
 			[[ -n $HANGAR_PUBLIC_ADDR ]] || exit 0
 			printf 'user=hangar-%s:%s\n' "$instance" "$HANGAR_TURN_PASSWORD"
-			for subnet in $(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "rhodes-hangar-${instance}_default" 2>/dev/null); do
-				[[ $subnet == */* ]] && is_ipv4 "${subnet%/*}" && printf 'allowed-peer-ip=%s\n' "$(cidr_range "$subnet")"
+			for ip in $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "rhodes-hangar-${instance}-la-pluma-1" 2>/dev/null); do
+				is_ipv4 "$ip" && printf 'allowed-peer-ip=%s\n' "$ip"
 			done
 			exit 0
 		)
@@ -600,6 +591,8 @@ cmd_refresh_ip() {
 	HANGAR_PUBLIC_IP=$ip
 	write_env
 	compose up -d la-pluma
+	# A recreated container may have a new address on its network.
+	sync_relay
 	check_console
 }
 
