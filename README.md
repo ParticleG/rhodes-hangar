@@ -98,10 +98,13 @@ answers the system resolver with `198.18.x` addresses. A refresh that finds MAA
 running leaves La Pluma alone and the setting unchanged, so the next one tries
 again.
 
+`deploy` with a domain installs a systemd user timer,
+`rhodes-hangar-refresh-ip-<instance>`, that runs `refresh-ip` every 5 minutes;
+a later `deploy` with an address or `--public-ip none` removes it.
+
 ```sh
 ./hangar deploy --bind 10.100.200.1 --public-ip office.example.org
-./hangar refresh-ip --timer on    # systemd user timer: refresh-ip every 5 minutes
-./hangar refresh-ip --timer off
+journalctl --user -u rhodes-hangar-refresh-ip-main.service   # what the checks did
 ```
 
 The timer runs while the user is logged in; `loginctl enable-linger` keeps it
@@ -135,7 +138,7 @@ Over the internet:
 | `./hangar up` / `down [-i NAME]` | Start or stop an instance |
 | `./hangar status [-i NAME]` | Containers, game version, La Pluma's connection check |
 | `./hangar screen [-i NAME]` | Mirror the instance with scrcpy (needs `--adb-bind`) |
-| `./hangar refresh-ip [-i NAME] [--timer on\|off]` | Resolve the `--public-ip` domain again and restart La Pluma if it moved |
+| `./hangar refresh-ip [-i NAME]` | Resolve the `--public-ip` domain again and restart La Pluma if it moved (the timer runs it) |
 
 `-i NAME` picks the instance (default `main`). A second instance needs its own
 web port (and adb port, if published): `./hangar deploy -i alt --web-port 13066`.

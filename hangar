@@ -42,8 +42,8 @@ usage: hangar COMMAND [-i INSTANCE] [options]
   up | down     Start or stop an instance.
   status        Containers, game version and La Pluma's connection check.
   refresh-ip    Resolve the --public-ip domain again; when its address moved, restart
-                La Pluma with it (not while MAA is running).
-                  --timer on|off               check every 5 minutes with a systemd user timer
+                La Pluma with it (not while MAA is running). deploy installs a systemd
+                user timer that runs it every 5 minutes while --public-ip is a domain.
   screen        Mirror the instance with scrcpy (needs --adb-bind; audio off: this
                 Android has no opus encoder).
 
@@ -70,7 +70,6 @@ gpu_node=""
 bind=""
 public_ip=""
 adb_bind=""
-timer=""
 
 parse_opts() {
 	while (($#)); do
@@ -83,7 +82,6 @@ parse_opts() {
 		--bind) bind=${2:?}; shift ;;
 		--public-ip) public_ip=${2:?}; shift ;;
 		--adb-bind) adb_bind=${2:?}; shift ;;
-		--timer) timer=${2:?}; shift ;;
 		-h | --help) usage; exit 0 ;;
 		*) die "unknown option: $1" ;;
 		esac
@@ -91,7 +89,6 @@ parse_opts() {
 	done
 	[[ $instance =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "instance names use a-z, 0-9 and -"
 	case $server in "" | official | bilibili) ;; *) die "--server is official or bilibili" ;; esac
-	case $timer in "" | on | off) ;; *) die "--timer is on or off" ;; esac
 	DATA=$ROOT/data/$instance
 	ENV_FILE=$DATA/instance.env
 	PROJECT=rhodes-hangar-$instance
@@ -441,14 +438,13 @@ cmd_deploy() {
 	wait_boot
 	install_game
 	check_console
+	sync_timer
 	printf '\nInstance "%s" is ready.\n' "$instance"
 	printf '  Web console   %s   (token: LA_PLUMA_TOKEN in data/%s/instance.env)\n' "$WEB" "$instance"
 	if is_hostname "$HANGAR_PUBLIC_ADDR"; then
-		printf '  Live preview  from other machines through %s, now %s (relay: UDP %s on every interface)\n' \
+		printf '  Live preview  from other machines through %s, now %s (relay: UDP %s on every interface;\n' \
 			"$HANGAR_PUBLIC_ADDR" "$HANGAR_PUBLIC_IP" "$HANGAR_WEB_PORT"
-		if ! systemctl --user is-enabled --quiet "$(timer_unit).timer" 2>/dev/null; then
-			printf '                La Pluma keeps that address until told: ./hangar refresh-ip -i %s --timer on\n' "$instance"
-		fi
+		printf '                its address is checked every 5 minutes)\n'
 	elif [[ -n $HANGAR_PUBLIC_IP ]]; then
 		printf '  Live preview  from other machines at %s (relay: UDP %s on every interface)\n' \
 			"$HANGAR_PUBLIC_IP" "$HANGAR_WEB_PORT"
@@ -489,10 +485,6 @@ console_busy() {
 cmd_refresh_ip() {
 	need docker curl jq
 	load_env
-	if [[ -n $timer ]]; then
-		set_timer "$timer"
-		return
-	fi
 	if ! is_hostname "$HANGAR_PUBLIC_ADDR"; then
 		printf 'Instance "%s" has no --public-ip domain; nothing to resolve.\n' "$instance"
 		return 0
@@ -523,20 +515,24 @@ cmd_refresh_ip() {
 
 timer_unit() { printf 'rhodes-hangar-refresh-ip-%s' "$instance"; }
 
-# A systemd user timer that runs refresh-ip for this instance every 5 minutes.
-set_timer() {
-	need systemctl
+# A domain for --public-ip gets a systemd user timer that runs refresh-ip every 5
+# minutes; an address or none removes it. Without a user systemd, deploy warns.
+sync_timer() {
 	local unit dir
 	unit=$(timer_unit)
 	dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-	if [[ $1 == off ]]; then
-		systemctl --user disable --now "$unit.timer" 2>/dev/null || true
+	if ! is_hostname "$HANGAR_PUBLIC_ADDR"; then
+		[[ -f $dir/$unit.timer ]] || return 0
+		systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || true
 		rm -f "$dir/$unit.service" "$dir/$unit.timer"
-		systemctl --user daemon-reload
-		printf 'Timer %s removed.\n' "$unit"
+		systemctl --user daemon-reload 2>/dev/null || true
+		step "Removed timer $unit: --public-ip is no longer a domain"
 		return 0
 	fi
-	is_hostname "$HANGAR_PUBLIC_ADDR" || die "instance \"$instance\" has no --public-ip domain to follow"
+	if ! systemctl --user show-environment >/dev/null 2>&1; then
+		printf 'hangar: no systemd user manager; run ./hangar refresh-ip -i %s yourself when the address changes\n' "$instance" >&2
+		return 0
+	fi
 	mkdir -p "$dir"
 	cat >"$dir/$unit.service" <<EOF
 [Unit]
@@ -558,10 +554,10 @@ OnUnitActiveSec=5min
 WantedBy=timers.target
 EOF
 	systemctl --user daemon-reload
-	systemctl --user enable --now "$unit.timer"
-	printf 'Timer %s checks %s every 5 minutes; log: journalctl --user -u %s.service\n' "$unit" "$HANGAR_PUBLIC_ADDR" "$unit"
+	systemctl --user enable --now --quiet "$unit.timer"
+	step "Timer $unit checks $HANGAR_PUBLIC_ADDR every 5 minutes (journalctl --user -u $unit.service)"
 	if [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) != yes ]]; then
-		printf 'It runs while you are logged in; to keep it running after logout: loginctl enable-linger %s\n' "$USER"
+		printf '    It runs while %s is logged in; loginctl enable-linger %s keeps it running.\n' "$USER" "$USER"
 	fi
 }
 
