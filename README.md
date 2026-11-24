@@ -138,7 +138,25 @@ Over the internet:
   token would cross the internet in clear text), UDP 3478 forwarded to this
   host, and `--public-ip` set to the public address or a DDNS name for it.
   Browsers on this host's own LAN reach the relay at the public address only if
-  the router also NATs that traffic back in (hairpin NAT).
+  the router also NATs that traffic back in (hairpin NAT). The router may
+  forward the port to another machine that passes it on, a gateway that is
+  always up, say; that machine must masquerade, so replies return through it:
+
+  ```nft
+  table ip rhodes_hangar_relay {
+  	chain prerouting {
+  		type nat hook prerouting priority dstnat;
+  		iifname "eth0" udp dport 3478 dnat to 192.168.1.20:3478
+  	}
+  	chain postrouting {
+  		type nat hook postrouting priority srcnat;
+  		oifname "eth0" ip daddr 192.168.1.20 udp dport 3478 masquerade
+  	}
+  }
+  ```
+
+  with `net.ipv4.ip_forward = 1` there. coturn itself stays on this host: it
+  relays to La Pluma's container address, which only this host reaches.
 - **One subdomain per instance**: La Pluma serves `/api` and `/webrtc-signaling`
   at the origin root, ignores its base path for both, and keeps its token in the
   browser's storage for the origin, so instances cannot share a host by path. A
@@ -170,6 +188,7 @@ Over the internet:
 | `./hangar status [-i NAME]` | Containers, game version, La Pluma's connection check |
 | `./hangar screen [-i NAME]` | Mirror the instance with scrcpy (needs `--adb-bind`) |
 | `./hangar refresh-ip [-i NAME]` | Resolve the `--public-ip` domain again and restart La Pluma if it moved (the timer runs it) |
+| `./hangar service --install \| --uninstall \| --status [-i NAME]` | The systemd user service `rhodes-hangar-up-<instance>` that runs `hangar up` at boot; `deploy` installs it |
 
 `-i NAME` picks the instance (default `main`). A second instance needs its own
 web port (and adb port, if published): `./hangar deploy -i alt --web-port 13066`.
@@ -191,4 +210,9 @@ instance pass its file: `docker compose --env-file data/alt/instance.env down`.
   `vm`, `abi`) and tracing, which a privileged container would otherwise apply
   to the host (redroid's stock init clears `kernel.modprobe`, which broke
   module autoloading and the Clash TUN device).
-- The containers do not restart on their own; `./hangar up` starts them.
+- The containers have no restart policy: after a reboot Docker may hand the
+  containers other addresses, and `hangar up` (run at boot by the service
+  `deploy` installs, retrying while Docker starts) also rewrites the relay's
+  allow list for them. The service needs `loginctl enable-linger` to run before
+  the user logs in. `./hangar down` stops an instance until the next boot;
+  `./hangar service --uninstall` keeps it from starting then.

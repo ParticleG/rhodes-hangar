@@ -45,6 +45,9 @@ usage: hangar COMMAND [-i INSTANCE] [options]
   install-game  Install or update Arknights on a running instance.
   up | down     Start or stop an instance.
   status        Containers, game version and La Pluma's connection check.
+  service       The systemd user service that runs `hangar up` for the instance at boot
+                (deploy installs it; `down` does not stop the next boot from starting it).
+                  --install | --uninstall | --status
   refresh-ip    Resolve the --public-ip domain again; when its address moved, restart
                 La Pluma with it (not while MAA is running). deploy installs a systemd
                 user timer that runs it every 5 minutes while --public-ip is a domain.
@@ -74,6 +77,7 @@ gpu_node=""
 bind=""
 public_ip=""
 adb_bind=""
+service_action=""
 
 parse_opts() {
 	while (($#)); do
@@ -86,6 +90,7 @@ parse_opts() {
 		--bind) bind=${2:?}; shift ;;
 		--public-ip) public_ip=${2:?}; shift ;;
 		--adb-bind) adb_bind=${2:?}; shift ;;
+		--install | --uninstall | --status) service_action=${1#--} ;;
 		-h | --help) usage; exit 0 ;;
 		*) die "unknown option: $1" ;;
 		esac
@@ -521,6 +526,7 @@ cmd_deploy() {
 	install_game
 	check_console
 	sync_timer
+	install_service
 	printf '\nInstance "%s" is ready.\n' "$instance"
 	printf '  Web console   %s   (token: LA_PLUMA_TOKEN in data/%s/instance.env)\n' "$WEB" "$instance"
 	if is_hostname "$HANGAR_PUBLIC_ADDR"; then
@@ -644,6 +650,86 @@ EOF
 	fi
 }
 
+boot_unit() { printf 'rhodes-hangar-up-%s' "$instance"; }
+
+linger_note() {
+	if [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) != yes ]]; then
+		printf '    It runs once %s logs in; loginctl enable-linger %s makes that boot.\n' "$USER" "$USER"
+	fi
+}
+
+# A systemd user service that runs `hangar up` at boot: the containers have no
+# restart policy on purpose, as `up` also rewrites the relay's allow list for
+# the addresses Docker hands out that time. It retries while Docker comes up.
+install_service() {
+	local unit file new
+	unit=$(boot_unit)
+	file=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$unit.service
+	if ! systemctl --user show-environment >/dev/null 2>&1; then
+		printf 'hangar: no systemd user manager; start the instance after a boot with ./hangar up -i %s\n' "$instance" >&2
+		return 0
+	fi
+	new=$(
+		cat <<EOF
+[Unit]
+Description=rhodes-hangar: start instance $instance
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Service]
+Type=oneshot
+ExecStart="$ROOT/hangar" up -i $instance
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+EOF
+	)
+	if [[ -f $file && $(<"$file") == "$new" ]] && systemctl --user is-enabled --quiet "$unit.service" 2>/dev/null; then
+		return 0
+	fi
+	mkdir -p "$(dirname "$file")"
+	printf '%s\n' "$new" >"$file"
+	systemctl --user daemon-reload
+	systemctl --user enable --quiet "$unit.service"
+	step "Service $unit starts instance \"$instance\" at boot (./hangar service --uninstall -i $instance removes it)"
+	linger_note
+}
+
+cmd_service() {
+	need systemctl
+	load_env
+	local unit file
+	unit=$(boot_unit)
+	file=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$unit.service
+	case $service_action in
+	install)
+		install_service
+		printf 'Service %s is installed.\n' "$unit"
+		;;
+	uninstall)
+		systemctl --user disable --quiet "$unit.service" 2>/dev/null || true
+		rm -f "$file"
+		systemctl --user daemon-reload
+		printf 'Service %s removed; the instance keeps running and no longer starts at boot.\n' "$unit"
+		;;
+	status)
+		if [[ ! -f $file ]]; then
+			printf 'Service %s is not installed.\n' "$unit"
+			return 0
+		fi
+		local at
+		at=$(systemctl --user show "$unit.service" -p ExecMainExitTimestamp --value)
+		printf 'Service %s: %s at boot; last run: %s\n' "$unit" \
+			"$(systemctl --user is-enabled "$unit.service" 2>/dev/null || true)" \
+			"${at:+$(systemctl --user show "$unit.service" -p Result --value) at $at}${at:-none since it was installed}"
+		linger_note
+		;;
+	*) die "service takes --install, --uninstall or --status" ;;
+	esac
+}
+
 main() {
 	local cmd=${1:-}
 	(($#)) && shift
@@ -653,6 +739,7 @@ main() {
 	up) parse_opts "$@"; need docker; load_env; write_maa_profile; compose up -d; sync_relay ;;
 	down) parse_opts "$@"; need docker; load_env; compose down ;;
 	status) parse_opts "$@"; cmd_status ;;
+	service) parse_opts "$@"; cmd_service ;;
 	refresh-ip) parse_opts "$@"; cmd_refresh_ip ;;
 	screen) parse_opts "$@"; need scrcpy adb; load_env
 		[[ -n $SERIAL ]] || die "adb is not published; run ./hangar deploy -i $instance --adb-bind 127.0.0.1, or use the web console's live preview"
