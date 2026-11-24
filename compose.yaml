@@ -22,7 +22,9 @@ services:
       - androidboot.redroid_height=720
       - androidboot.redroid_dpi=240
       - androidboot.redroid_fps=30
-      - androidboot.redroid_gpu_mode=host
+      # host: render on ${HANGAR_GPU_NODE}; guest: software rendering (--gpu-node none).
+      # Files from before software rendering lack the mode: they render on the GPU.
+      - androidboot.redroid_gpu_mode=${HANGAR_GPU_MODE:-host}
       - androidboot.redroid_gpu_node=${HANGAR_GPU_NODE:?}
 
   la-pluma:
