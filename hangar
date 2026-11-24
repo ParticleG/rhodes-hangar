@@ -363,6 +363,10 @@ relay_entries() {
 # stops it to match. Runs after the instance's containers exist (their network).
 sync_relay() {
 	local entries relay_ip conf old="" file=$RELAY_DIR/turnserver.conf
+	# Each instance's boot service syncs after its own `up`; they may run at once.
+	mkdir -p "$ROOT/data"
+	exec 9>"$ROOT/data/.relay.lock"
+	flock 9
 	entries=$(relay_entries)
 	if [[ -z $entries ]]; then
 		[[ -f $file ]] || return 0
