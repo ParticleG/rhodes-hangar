@@ -192,9 +192,15 @@ derive() {
 	fi
 }
 
-# This host's first render node, or none: a VM or server without a GPU renders in software.
+# The render node the other instances use, so new ones share their GPU; else this
+# host's first render node; else none: a VM or server without a GPU renders in software.
 default_gpu_node() {
-	local node
+	local env node
+	for env in "$ROOT"/data/*/instance.env; do
+		[[ -f $env ]] || continue
+		node=$(sed -n 's|^HANGAR_GPU_NODE=\(/dev/dri/renderD[0-9]*\)$|\1|p' "$env")
+		[[ -n $node && -c $node ]] && { printf '%s\n' "$node"; return 0; }
+	done
 	for node in /dev/dri/renderD*; do
 		[[ -c $node ]] && { printf '%s\n' "$node"; return 0; }
 	done
@@ -379,12 +385,18 @@ relay_entries() {
 
 # Writes the relay's configuration from every instance and starts, restarts or
 # stops it to match. Runs after the instance's containers exist (their network).
+# Each instance's boot service syncs after its own `up`, so they may run at once:
+# the lock is held for the sync alone, not for the rest of a deploy.
 sync_relay() {
-	local entries relay_ip conf old="" file=$RELAY_DIR/turnserver.conf
-	# Each instance's boot service syncs after its own `up`; they may run at once.
 	mkdir -p "$ROOT/data"
-	exec 9>"$ROOT/data/.relay.lock"
-	flock 9
+	{
+		flock 9
+		sync_relay_locked
+	} 9>"$ROOT/data/.relay.lock"
+}
+
+sync_relay_locked() {
+	local entries relay_ip conf old="" file=$RELAY_DIR/turnserver.conf
 	entries=$(relay_entries)
 	if [[ -z $entries ]]; then
 		[[ -f $file ]] || return 0
