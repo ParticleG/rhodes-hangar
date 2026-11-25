@@ -10,5 +10,9 @@ services:
     # Host network: relayed traffic reaches La Pluma at its compose network address.
     network_mode: host
     user: "${HANGAR_UID:?}:${HANGAR_GID:?}"
+    # The image's default command adds --external-ip=$(detect-external-ip), which asks
+    # a public service at start: behind a proxy it reports the proxy's address. The
+    # relay's address is relay-ip in the file; browsers reach it through the router.
+    command: ["-c", "/etc/coturn/turnserver.conf"]
     volumes:
       - ./data/relay/turnserver.conf:/etc/coturn/turnserver.conf:ro
