@@ -28,10 +28,11 @@ Android renders on the host GPU through a render node (`--gpu-node`; a new
 instance takes the node the other instances use, else the host's first
 `/dev/dri/renderD*`), or in software with `--gpu-node none` (SwiftShader; the
 default where the host has no render node, a server or VM without a GPU).
-Software rendering draws on the CPUs: in a 16-vCPU VM on a Xeon E5-2696 v4 with
-`--cpus 14`, the game holds 30 fps on its main screen and base using 6 to 9
-cores, but battles run at about 8.5 fps on 10 to 11, and MAA's screenshots take
-about 200 to 300 ms (80 ms on a Radeon 610M).
+Software rendering draws on the CPUs: in a VM on a Xeon E5-2696 v4, the game
+holds 30 fps on its main screen and base using 6 to 9 cores, and battles run at
+about 9.5 fps on 12.5 (24 vCPUs, `--cpus 22`; 8.5 fps with 16 and `--cpus 14`).
+SwiftShader renders on at most 16 threads, so more than about 20 CPUs adds
+little. MAA's screenshots take about 190 ms (80 ms on a Radeon 610M).
 
 Without binderfs (Debian's kernel builds binder as the module `binder_linux`),
 load the module with the three devices Android uses and let its services open
