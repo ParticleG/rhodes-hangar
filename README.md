@@ -9,7 +9,7 @@ An instance is a compose project (`rhodes-hangar-<name>`) with two containers:
 
 | Container | What it is |
 | --- | --- |
-| `android` | redroid Android 14 with Google's AVD 34 ARM translation layer (the game ships ARM code only), limited to 8 CPUs and 4096 threads |
+| `android` | redroid Android 14 with Google's AVD 34 ARM translation layer (the game ships ARM code only), limited to 4096 threads and, by default, 8 CPUs (`--cpus`) |
 | `la-pluma` | The La Pluma console and MAA, connected to `android:5555` over the compose network |
 
 Its data lives in `data/<name>/`: Android's `/data`, La Pluma's data, MAA's
@@ -65,7 +65,7 @@ downloads about 12 GB of resources on its first launch.
 
 Running `deploy` again is safe: it keeps the data and tokens, applies the
 options given (`--server`, `--web-port`, `--bind`, `--public-ip`,
-`--adb-bind`, `--adb-port`, `--gpu-node`), and updates the game when a newer
+`--adb-bind`, `--adb-port`, `--gpu-node`, `--cpus`), and updates the game when a newer
 client is out. To move an existing console in with its token, set
 `LA_PLUMA_TOKEN` in the environment for the first deploy.
 

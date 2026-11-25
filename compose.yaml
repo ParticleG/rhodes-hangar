@@ -10,9 +10,11 @@ services:
     pull_policy: never
     privileged: true
     # Contain a runaway guest (2026-11-19: a crash_dump32 storm filled the host's 24 CPUs).
-    # pids counts threads; Android with the game running peaks near 1200.
+    # pids counts threads; Android with the game running peaks near 1400.
     pids_limit: 4096
-    cpus: 8
+    # --cpus (default 8). Software rendering (--gpu-node none) needs more: the game
+    # draws on these CPUs.
+    cpus: ${HANGAR_CPUS:-8}
     volumes:
       - ./data/${HANGAR_INSTANCE:?}/android:/data
     command:
