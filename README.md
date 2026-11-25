@@ -24,11 +24,13 @@ Linux with Docker and binder in the kernel (`CONFIG_ANDROID_BINDER_IPC` or, as
 on current Arch kernels, `CONFIG_ANDROID_BINDER_IPC_RUST`), `curl` and `jq`.
 `adb` and `scrcpy` are optional, for `hangar screen`.
 
-Android renders on the host GPU through a render node (`--gpu-node`, default
-the host's first `/dev/dri/renderD*`), or in software with `--gpu-node none`
-(SwiftShader; the default where the host has no render node, a server or VM
-without a GPU). On 16 vCPUs of a Xeon E5-2696 v4 the game's start screen holds
-30 fps in software using about 4 cores.
+Android renders on the host GPU through a render node (`--gpu-node`; a new
+instance takes the node the other instances use, else the host's first
+`/dev/dri/renderD*`), or in software with `--gpu-node none` (SwiftShader; the
+default where the host has no render node, a server or VM without a GPU).
+Software rendering draws on the CPUs: in a 16-vCPU VM on a Xeon E5-2696 v4 with
+`--cpus 14`, the game holds 30 fps on its main screen and base using 6 to 9
+cores, and MAA's screenshots take about 200 ms (80 ms on a Radeon 610M).
 
 Without binderfs (Debian's kernel builds binder as the module `binder_linux`),
 load the module with the three devices Android uses and let its services open

@@ -42,8 +42,8 @@ usage: hangar COMMAND [-i INSTANCE] [options]
                                                none (default), 127.0.0.1, or another address
                   --adb-port N                 adb host port when published (default: 15556)
                   --gpu-node PATH|none         render node for Android's GPU, or none for software
-                                               rendering (default: this host's first render node,
-                                               none without one)
+                                               rendering (new instance default: the node other
+                                               instances use, else this host's first, else none)
                   --cpus N                     CPUs Android may use (new instance default: 8)
   install-game  Install or update Arknights on a running instance.
   up | down     Start or stop an instance.
