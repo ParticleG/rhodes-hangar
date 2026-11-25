@@ -466,7 +466,8 @@ ensure_image() {
 # ---- Android ----
 
 # A command in Android, run through the container: adb need not leave the compose network.
-android() { compose exec -T android "$@"; }
+# Not reading hangar's stdin, which may be the rest of a script (ssh host bash -s).
+android() { compose exec -T android "$@" </dev/null; }
 
 wait_boot() {
 	step "Waiting for Android to boot"
@@ -530,7 +531,7 @@ install_game() {
 	# The game ships ARM code only; the translation layer runs it on x86_64.
 	# pm reads the package from stdin, streamed through the container.
 	size=$(stat -c %s "$apk")
-	android pm install -r --abi arm64-v8a -S "$size" <"$apk"
+	compose exec -T android pm install -r --abi arm64-v8a -S "$size" <"$apk"
 	[[ $(installed_version) == "$want" ]] || die "after install the version is $(installed_version), not $want"
 	[[ -z $have ]] && first_install=1
 	return 0
