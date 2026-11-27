@@ -55,3 +55,5 @@ services:
       - ./data/${HANGAR_INSTANCE}/la-pluma/maa-config:/root/.config/maa
       # MaaCore and resources, installed by the image on first start.
       - ./data/${HANGAR_INSTANCE}/la-pluma/maa-data:/root/.local/share/maa
+      # MAA's logs (debug/asst.log), debug screenshots and recognition cache.
+      - ./data/${HANGAR_INSTANCE}/la-pluma/maa-state:/root/.local/state/maa

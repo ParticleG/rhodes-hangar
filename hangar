@@ -324,8 +324,14 @@ configure_instance() {
 	fi
 	# Checked before anything is created, so a bad value leaves nothing behind.
 	write_env
-	mkdir -p "$DATA"/android "$DATA"/la-pluma/{data,maa-config/profiles,maa-data}
+	make_dirs
 	load_env
+}
+
+# The instance's bind mounts, made here so they belong to this user, not to
+# Docker's root (it creates a missing one): `up` runs them after an upgrade too.
+make_dirs() {
+	mkdir -p "$DATA"/android "$DATA"/la-pluma/{data,maa-config/profiles,maa-data,maa-state}
 }
 
 # maa-cli's connection profile: La Pluma runs MAA against it. redroid needs the
@@ -779,7 +785,7 @@ main() {
 	case $cmd in
 	deploy) parse_opts "$@"; cmd_deploy ;;
 	install-game) parse_opts "$@"; need docker curl jq; load_env; wait_boot; install_game ;;
-	up) parse_opts "$@"; need docker; load_env; write_maa_profile; compose up -d; sync_relay ;;
+	up) parse_opts "$@"; need docker; load_env; make_dirs; write_maa_profile; compose up -d; sync_relay ;;
 	down) parse_opts "$@"; need docker; load_env; compose down ;;
 	status) parse_opts "$@"; cmd_status ;;
 	service) parse_opts "$@"; cmd_service ;;
